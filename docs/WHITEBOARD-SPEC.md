@@ -46,7 +46,7 @@ Der Opener muss auch bei geschlossener Sidebar im `shell.overlay` leben.
 Ein fehlender oder nicht erreichbarer Browser bleibt nach dem Timeout ein
 ehrlicher `blocked`-Zustand; der Agent darf keinen Erfolg behaupten.
 
-## Shape-Schema (tldraw 3.15.6)
+## Shape-Schema (tldraw 5.4.2)
 
 - Note-Text: `props.richText` als TipTap-Dokument, nicht `props.text`.
 - Pfeil-Label: `props.text`; Geometrie `props.start` und `props.end` als
@@ -60,6 +60,9 @@ ehrlicher `blocked`-Zustand; der Agent darf keinen Erfolg behaupten.
   Eltern, damit eine Löschung keine Zettel-Kaskade auslöst.
 - Keine Mutation in 0×0- oder `display:none`-Containern. Den Editor erst bei
   ausreichender Größe mounten.
+- Das tldraw-Seitenmenü bleibt unverändert aktiv; Seiten werden über die
+  öffentliche tldraw-Aktion `editor.deletePage` gelöscht. Der generische
+  Client überschreibt diese UI nicht.
 
 ## Seiten- und Link-Vertrag
 
@@ -83,10 +86,12 @@ kontextlosen oder geschlossenen DSH-Panel führen.
   Seite neu laden und Snapshot-Persistenz erhalten.
 - `live=false` bedeutet „kein aktueller Browser-Client lauscht“, nicht „Board
   ist leer“.
+- Kurzzeitige Netzwerkabbrüche beim DSH-API-Request werden einmal begrenzt
+  wiederholt. Der kompakte Live-Snapshot und der dauerhafte Vollsnapshot sind
+  getrennt; ein Ausfall des einen beendet den anderen Sync nicht.
 
 ## Nicht-Ziele
 
 Kein Domain-Persistenzmodell, keine pädagogische Entscheidung, kein
 automatischer Turn durch eine Board-Änderung und kein WebSocket-Live-Sync sind
 Teil dieses generischen Plugins.
-

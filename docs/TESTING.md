@@ -65,6 +65,9 @@ werden; eine reine Chat-Antwort reicht nicht.
   „Client fehlt“ behandelt werden.
 - Falsche tldraw-Props dürfen weder den Poll-Loop noch die gesamte DSH-Seite
   unkontrolliert beenden.
+- Im Seitenmenü eine zweite Seite anlegen, ihr Untermenü öffnen und „Löschen“
+  wählen: Die Seite verschwindet unmittelbar, der verbleibende Stand wird
+  nach dem nächsten Store-Listener-Sync wieder geladen.
 
 ### Netzwerk-Leerlauf
 

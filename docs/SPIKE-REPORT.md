@@ -21,8 +21,8 @@
 
 | Hälfte | Ort | Verantwortung |
 |---|---|---|
-| **Host** | `lib/index.js` (ESM) | HTTP-API `/dsh-whiteboard/api` (`wb-poll`, `wb-snapshot`, `wb-session-key`), 9 Agenten-Tools über den `tools`-Service, Session-Erkennung via `exec.agent.id` |
-| **Client** | `lib/client.js` (Classic Script) | Tab-Typ + Tab-Körper, genau **eine** tldraw-3.15.6-Instanz (esm.sh), 450-ms-Polling, Öffner-Chip |
+| **Host** | `lib/index.js` (ESM) | HTTP-API `/dsh-whiteboard/api` (`wb-poll`, `wb-snapshot`, `wb-board`, `wb-save`), 9 Agenten-Tools über den `tools`-Service, Session-Erkennung via `exec.agent.id` |
+| **Client** | `lib/client.js` (Classic Script) | Tab-Typ + Tab-Körper, genau **eine** tldraw-5.4.2-Instanz (esm.sh), sessiongebundene Event-Streams und Store-Listener, Öffner-Chip |
 
 **Registrierung (zweistufig, verifiziert gegen DSH-Code und Doku):**
 
@@ -88,10 +88,10 @@ Die ältere DSH-Version hatte `conversation.view` (Tab) und `details` (rechte Sp
 `ctx.get('sidebarRightTabs')` ist beim ersten `apply` oft `undefined`, wenn das Sidebar-Paket später lädt → nichts wird registriert (stiller Fehlschlag). Fix: `inject: ['slots', 'sidebarRightTabs', 'sidebarRight']` — Cordis wartet und wendet erneut an.
 
 ### 3.8 Command-Queue × Client-Update
-Befehle aus der Warteschlange können vom alten Client-Code ausgeführt werden, bevor die neue Version lädt (Crash-Gefahr). Für Produktion: Queue an die Package-Version binden oder Event-Sync statt Polling.
+Befehle aus der Warteschlange können vom alten Client-Code ausgeführt werden, bevor die neue Version lädt (Crash-Gefahr). Der aktuelle Client nutzt dafür sessiongebundene Event-Streams; Queue und Client bleiben weiterhin generische Seams.
 
 ### 3.9 Knopf-Interaktion: der Agent startet sich nicht selbst
-Board-Änderungen lösen **keinen** Agenten-Turn aus — es gibt kein Board-Event, das auf die Konversation wirkt, und der Host pollt nur Snapshots. Der Agent kann also nicht aus sich heraus auf eine neue Zettel-Idee reagieren; der **Mensch bleibt der Auslöser**. Verifizierter Weg aus dem Tab-Body heraus: Standard-Prop `inputActions` → `setDraft(prompt)` und ~60 ms später `submit()`. Ein Turn entsteht damit genau so, als hätte der Mensch getippt.
+Board-Änderungen lösen **keinen** Agenten-Turn aus — es gibt kein Board-Event, das auf die Konversation wirkt; der **Mensch bleibt der Auslöser**. Verifizierter Weg aus dem Tab-Body heraus: Standard-Prop `inputActions` → `setDraft(prompt)` und ~60 ms später `submit()`. Ein Turn entsteht damit genau so, als hätte der Mensch getippt.
 
 Vier Trigger in der Kopfzeile: `🤖 Dazu fragen` (hängt die aktuelle Auswahl als ` Ausgewählt habe ich: „…“.` an den Prompt), `🔍 Feedback` (schickt das Snapshot-Delta seit dem letzten Feedback), `🤖 Cluster vorschlagen`, `🤖 Ideen ergänzen`. Beide Zähler haben verschiedene Bedeutung: `Dazu fragen (n)` = n ausgewählte Zettel, `Feedback (n)` = n offene Änderungen seit dem letzten Feedback.
 
@@ -100,7 +100,11 @@ Ein dauerhaftes Seitenpanel dominiert die Fläche, die eigentlich der Canvas bra
 
 ---
 
-## 4. Verifizierte API-Fakten (tldraw 3.15.6)
+## 4. Historische API-Fakten (tldraw 3.15.6)
+
+Die folgenden Detailbefunde stammen aus dem ursprünglichen Spike. Der aktuelle
+CDN-Client zielt auf tldraw `5.4.2`; die 5.4.2-Browserabnahme ist separat zu
+protokollieren.
 
 - Notiz-Text = `props.richText` (TipTap-Doc) — **nicht** `props.text`
 - Pfeil-Label = `props.text` (plain); Pfeil-Geometrie = `props.start/end` als `{x,y}`

@@ -52,7 +52,7 @@ Patch-Eintrag löschen, Junction entfernen, DSH neu starten.
 | Hälfte | Ort | Rolle |
 |---|---|---|
 | Host | `lib/index.js` (ESM) | HTTP-API `/dsh-whiteboard/api` (`wb-poll`, `wb-snapshot`, `wb-board`, `wb-save`), generischer Snapshot-Store unter `$DSH_HOME/whiteboard-snapshots`, Tool-Registrierung über `tools`-Service |
-| Client | `lib/client.js` (Classic Script) | Tab-Typ + Tab-Körper, eine tldraw-3.15.6-Instanz (esm.sh), 450-ms-Polling, Öffner-Chip |
+| Client | `lib/client.js` (Classic Script) | Tab-Typ + Tab-Körper, eine tldraw-5.4.2-Instanz (esm.sh), sessiongebundene Event-Streams und Store-Listener, Öffner-Chip |
 
 **Registrierung (zweistufig):**
 
@@ -70,3 +70,6 @@ Der Client deklariert `inject: ['slots', 'sidebarRightTabs', 'sidebarRight']`, d
 - Chrome und Firefox teilen den lokalen IndexedDB-Cache nicht; der Host-Store ist deshalb die gemeinsame Persistenzquelle. Bei zwei gleichzeitigen Browsern wird ein Versionskonflikt erkannt und der spätere Stand nicht still überschrieben. Ein vollständiger Live-Sync ist ein eigener Ausbau.
 - Pfeil-Bindungen: Erstellung über `editor.createBindings`; das Auslesen ist versionsabhängig, daher prüft der Snapshot zusätzlich per Store-Scan.
 - tldraw wird nie in einen unsichtbaren Container gemountet (sonst Text-Mess-Crash).
+- Das Seitenmenü stammt vollständig aus tldraw; in 5.4.2 löst das Löschmenü
+  die öffentliche `editor.deletePage`-Aktion aus. Der Client fängt keine
+  tldraw-UI-Clicks per DOM ab.

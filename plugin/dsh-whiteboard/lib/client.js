@@ -7,7 +7,7 @@ window.__ModuleLoader__.load({
   factory: function (require) {
     var React = require('react');
 
-    var TL_VERSION = '3.15.6';
+    var TL_VERSION = '5.4.2';
     var TYPE_ID = 'dsh-whiteboard';
     var TYPE_KIND = 'whiteboard';
     var OPEN_PREFERENCE_KEY = 'dsh-whiteboard:open-preference';
@@ -59,12 +59,40 @@ window.__ModuleLoader__.load({
     function rememberBoardClosed() { removeLocalStorage(OPEN_PREFERENCE_KEY); }
     function rememberSession(sessionId) { if (sessionId) writeLocalStorage(LAST_SESSION_KEY, String(sessionId)); }
 
+    function isRetryableNetworkError(error) {
+      var message = String(error && error.message || error || '');
+      return error instanceof TypeError || /NetworkError|Failed to fetch|Load failed|network request failed/i.test(message);
+    }
+
     function apiCall(method, args) {
-      return fetch(API_BASE, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ method: method, args: args || {} })
-      }).then(function (r) { return r.json(); });
+      var retries = 0;
+      function request() {
+        return fetch(API_BASE, {
+          method: 'POST',
+          credentials: 'same-origin',
+          cache: 'no-store',
+          headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+          body: JSON.stringify({ method: method, args: args || {} })
+        }).then(function (r) {
+          return r.text().then(function (text) {
+            var value = null;
+            try { value = text ? JSON.parse(text) : {}; } catch (parseError) {
+              throw new Error('Whiteboard-API liefert ungültiges JSON (HTTP ' + r.status + ')');
+            }
+            if (!r.ok) throw new Error(value && value.error || 'Whiteboard-API HTTP ' + r.status);
+            return value;
+          });
+        }).catch(function (error) {
+          // A reload or a short DSH route restart can abort one request. Retry
+          // once, but never create an idle request loop for a broken route.
+          if (retries < 1 && isRetryableNetworkError(error)) {
+            retries++;
+            return new Promise(function (resolve) { clientCtx.timeout(resolve, 250); }).then(request);
+          }
+          throw error;
+        });
+      }
+      return request();
     }
 
     function activeSessionId() {
@@ -613,9 +641,8 @@ window.__ModuleLoader__.load({
       var tries = attempts || 0;
       var page = null;
       try { page = typeof editor.getPage === 'function' ? editor.getPage(expected) : null; } catch (err) {}
-      // In tldraw 3.15.6 the page returned by createPage is observable in
-      // getPages() before getPage(id) accepts the same id. Treat the public
-      // page list as authoritative during this short publication window.
+      // Treat the public page list as authoritative during the short
+      // publication window in which a newly created page becomes queryable.
       if (!page && typeof editor.getPages === 'function') {
         try {
           var pages = editor.getPages() || [];
@@ -763,9 +790,8 @@ window.__ModuleLoader__.load({
       var sourcePage = readCurrentPage(editor);
       var sourceAnchor = plan.overview && plan.overview.sourceRef ? sourceShapes[plan.overview.sourceRef] : null;
       var sourceBounds = sourceAnchor ? editor.getShapePageBounds(sourceAnchor.id) : null;
-      // tldraw 3.15.6 does not apply a page switch reliably when it is made
-      // inside the same editor.run transaction as the following shape writes.
-      // Resolve and activate the target before entering the mutation batch.
+      // Resolve and activate the target before entering the mutation batch so
+      // page switching stays independent of the following shape writes.
       var targetPage;
       if (plan.page.action === 'use_current') {
         targetPage = editor.getPage(editor.getCurrentPageId());
@@ -1790,7 +1816,14 @@ window.__ModuleLoader__.load({
             if (results.length) showPanelBriefly(5000);
             if (boardChanged && lastDiffSnapshot) recordChanges(lastDiffSnapshot, snap);
             lastDiffSnapshot = snap;
-            var summarySave = apiCall('wb-snapshot', Object.assign({ sessionId: activeSessionId() }, snap));
+            var summarySave = apiCall('wb-snapshot', Object.assign({ sessionId: activeSessionId() }, snap)).catch(function (error) {
+              // The compact live summary and the durable full snapshot are
+              // independent. A temporary summary-route failure must not turn
+              // a successful board edit into a failed sync transaction.
+              pushActivity('⚠️ Live-Snapshot fehlgeschlagen: ' + truncate(error && error.message || error, 120));
+              console.error('[dsh-whiteboard] live snapshot update failed', error);
+              return { ok: false, error: String(error && error.message || error) };
+            });
             var persistentSave = boardChanged || results.length ? persistToServer(editor, mods, snap) : Promise.resolve();
             return Promise.all([summarySave, persistentSave]).then(function () {
               pushUi({ counts: snap.counts, notes: snap.notes, proposals: snap.proposals, selection: snap.selection });
@@ -1798,10 +1831,10 @@ window.__ModuleLoader__.load({
           })
           .catch(function (err) {
             // Do not let a malformed/unsupported editor snapshot silently
-            // stop the polling chain; keep the host session-scoped and expose
+            // stop the sync chain; keep the host session-scoped and expose
             // the diagnostic in the existing board log.
             var message = String((err && err.message) || err || 'unbekannter Poll-Fehler');
-            console.error('[dsh-whiteboard] snapshot poll failed', err);
+            console.error('[dsh-whiteboard] snapshot sync failed', err);
             pushActivity('⚠️ Snapshot fehlgeschlagen: ' + truncate(message, 120));
           })
           .then(function () {
