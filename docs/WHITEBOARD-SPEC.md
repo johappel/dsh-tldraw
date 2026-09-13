@@ -49,7 +49,10 @@ Der Opener muss auch bei geschlossener Sidebar im `shell.overlay` leben.
    ruft `sidebarRight.openTab('whiteboard')` auf. Der Opener lebt in der
    root-scoped `shell.overlay`-Fläche und liest die aktive Session deshalb über
    `useSessions(state.current)`; der Sidebar-Body selbst erhält weiterhin
-   `sessionId`/`useSession` direkt.
+   `sessionId`/`useSession` direkt. Ein Rückgabewert von `openTabIn` gilt beim
+   Reload noch nicht als Erfolg: Der Opener wiederholt den Versuch, bis der
+   sessiongebundene Board-Body die Ziel-Session übernommen hat, und bestätigt
+   die Öffnung erst dann gegenüber dem Host.
 4. Der Renderer wartet begrenzt auf den ersten Live-Snapshot und reiht erst
    danach den RenderPlan ein.
 5. Ein explizit geöffnetes Board speichert seine Ansicht pro Browser-Origin.
@@ -57,6 +60,9 @@ Der Opener muss auch bei geschlossener Sidebar im `shell.overlay` leben.
    ersten Render noch nicht gemountet ist. Die workspacegebundene Board-ID
    wird während der Session-Rehydration begrenzt erneut aufgelöst; ein
    endgültiger Identitätsfehler bleibt fail-closed.
+   Überlappende asynchrone Mount-Versuche werden über eine Laufnummer
+   verworfen; nur der noch aktuelle Session- und Persistence-Key darf den
+   einen globalen tldraw-Host mounten.
 
 Ein fehlender oder nicht erreichbarer Browser bleibt nach dem Timeout ein
 ehrlicher `blocked`-Zustand; der Agent darf keinen Erfolg behaupten.
@@ -64,10 +70,24 @@ ehrlicher `blocked`-Zustand; der Agent darf keinen Erfolg behaupten.
 ## Shape-Schema (tldraw 5.4.2)
 
 - Note-Text: `props.richText` als TipTap-Dokument, nicht `props.text`.
+- Freitext: `type: 'text'` mit `props.richText`, `font: 'sans'`, einer
+  allowlisteten Größe (`s`, `m`, `l`, `xl`) und `autoSize: true`. Der
+  generische RenderPlan nimmt dafür nur neue, nicht-leere Text-Elemente an;
+  vorhandene Shapes werden nicht in Freitext umgedeutet.
 - Pfeil-Label: `props.text`; Geometrie `props.start` und `props.end` als
   `{x, y}`.
 - Frames: `{w, h, name}`; Frame-Hintergründe mit `sendToBack` hinter den
   Inhalt legen.
+- Der generische RenderPlan legt seine eigenen Karten mit `font: 'sans'` an,
+  misst die Höhe jeder Kartenzeile und erweitert den Arbeitsframe bei Bedarf.
+  Nur diese neuen `renderer:*`-Shapes werden danach als Frame-Kinder in lokale
+  Koordinaten überführt; menschliche Shapes bleiben stets außerhalb dieser
+  Löschkaskade.
+- Der generische Template-Katalog umfasst `comparison`, `pro_con`,
+  `cause_effect`, `sequence`, `cluster`, `matrix` und `timeline`.
+  Vergleichsformen haben feste Freitext-Überschriften und horizontale/vertikale
+  Trennlinien; Sequenz und Zeitstrahl lesen links nach rechts. Nicht bekannte
+  Template-Namen enden vor der Mutation mit einem Fehler.
 - Bindings mit `editor.createBindings`; das Vorhandensein belastbar per
   Store-Scan prüfen, nicht allein über versionsabhängige Lesehelfer.
 - Reparenting in einem `editor.run`-Schritt mit frisch gelesenen Shape-
@@ -99,9 +119,12 @@ kontextlosen oder geschlossenen DSH-Panel führen.
   Befehl darf den Poll-Loop nicht beenden.
 - Bei tldraw-Schemafehlern: Fehler protokollieren, Board nicht zurücksetzen,
   Seite neu laden und Snapshot-Persistenz erhalten.
-- `connected=true` bedeutet nur, dass der sessiongebundene EventStream steht.
-  `live=true` wird erst nach einem aktuellen kompakten Snapshot gesetzt; ein
-  verbundenes Board ohne Snapshot bleibt für den Companion nicht lesbar.
+- `connected=true` bedeutet, dass der sessiongebundene Command-EventStream
+  aktuell offen ist. `live=true` wird gesetzt, wenn dieser Schreibkanal und ein
+  kompakter Snapshot vorliegen. Ein unverändertes, aber geöffnetes Board bleibt
+  damit auch nach mehr als 15 Sekunden schreibbar; das Alter des letzten
+  Snapshots trennt den Kanal nicht. Ein verbundenes Board ohne Snapshot bleibt
+  für den Companion nicht lesbar.
 - Nach einem Host-Neustart sendet ein erneut verbundener Browser genau einen
   Bootstrap-Snapshot, auch wenn auf dem Canvas noch keine neue Mutation
   stattgefunden hat.

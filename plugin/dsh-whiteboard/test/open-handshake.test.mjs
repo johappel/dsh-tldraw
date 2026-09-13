@@ -147,6 +147,8 @@ test('a render command is delivered on its session command stream', async () => 
 
 test('command results stay attached to the matching session snapshot', async () => {
   const { tools, handlers } = createHost();
+  eventStream(handlers.get('/dsh-whiteboard/command-events'), 'session-a');
+  eventStream(handlers.get('/dsh-whiteboard/command-events'), 'session-b');
   const stateSnapshot = (sessionId, commandId) => api(handlers.get('/dsh-whiteboard/api'), {
     method: 'wb-snapshot',
     args: { sessionId, notes: [{ id: 'note:' + sessionId, text: sessionId }], commandResults: [{ commandId, op: 'render-plan', ok: true }] }
@@ -180,4 +182,26 @@ test('a command channel is connected but becomes live only after its first snaps
   assert.equal(after.connected, true);
   assert.equal(after.live, true);
   assert.equal(after.available, true);
+});
+
+test('an idle open board remains writable after its snapshot is older than 15 seconds', async () => {
+  const { tools, handlers } = createHost();
+  const writes = eventStream(handlers.get('/dsh-whiteboard/command-events'), 'session-a');
+  await api(handlers.get('/dsh-whiteboard/api'), {
+    method: 'wb-snapshot', args: { sessionId: 'session-a', notes: [], frames: [], arrows: [], selection: [] }
+  });
+
+  const realNow = Date.now;
+  Date.now = () => realNow() + 16_000;
+  try {
+    const state = await tools.get('whiteboard_state').execute({}, { agent: { id: 'session-a' } });
+    assert.equal(state.connected, true);
+    assert.equal(state.live, true);
+    const accepted = await tools.get('whiteboard_render_plan').execute({ op: 'render-plan', plan: {} }, { agent: { id: 'session-a' } });
+    assert.equal(accepted.accepted, true);
+    assert.match(writes.at(-1), /event: whiteboard-commands/);
+    assert.match(writes.at(-1), new RegExp('"commandId":"' + accepted.commandId + '"'));
+  } finally {
+    Date.now = realNow;
+  }
 });

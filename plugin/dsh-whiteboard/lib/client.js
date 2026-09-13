@@ -24,6 +24,10 @@ window.__ModuleLoader__.load({
     var boardRoot = null;
     var boardKey = null;
     var boardSessionId = null;
+    // Invalidate every in-flight asynchronous mount when the session or
+    // persistence identity changes. A resolved dynamic import must never
+    // mount an editor that belonged to an earlier sidebar lifecycle.
+    var boardMountEpoch = 0;
     var requestedSessionId = null;
     var serverBoardId = null;
     var serverVersion = 0;
@@ -352,6 +356,7 @@ window.__ModuleLoader__.load({
     }
 
     function resetMountedBoard() {
+      boardMountEpoch += 1;
       try { if (boardRoot) boardRoot.unmount(); } catch (err) {}
       boardRoot = null;
       editorHolder.editor = null;
@@ -393,14 +398,21 @@ window.__ModuleLoader__.load({
       }
       if (requestedSessionId !== sessionId) return;
       if (boardRoot || editorHolder.editor) return;
+      // The identity is reserved before the asynchronous runtime import. This
+      // stops two effects for the same sidebar session from creating two React
+      // roots in the single global host while the import is still pending.
+      if (boardSessionId === sessionId && boardKey === persistenceKey) return;
+      var mountEpoch = ++boardMountEpoch;
       boardKey = persistenceKey;
       boardSessionId = sessionId;
       loadModules().then(function (mods) {
+        if (mountEpoch !== boardMountEpoch || requestedSessionId !== sessionId || boardSessionId !== sessionId || boardKey !== persistenceKey) return;
         boardRoot = mods.reactDomClient.createRoot(boardHost);
         boardRoot.render(mods.react.createElement(mods.tldraw.Tldraw, {
           persistenceKey: persistenceKey,
           inferDarkMode: true,
           onMount: function (editor) {
+            if (mountEpoch !== boardMountEpoch || requestedSessionId !== sessionId) return;
             editorHolder.editor = editor;
             hydrateFromServer(editor, loadedModules).then(function () {
               if (commandConsumer) commandConsumer([], true);
@@ -419,6 +431,9 @@ window.__ModuleLoader__.load({
           }
         }));
       }).catch(function (err) {
+        if (mountEpoch !== boardMountEpoch || requestedSessionId !== sessionId) return;
+        boardKey = null;
+        boardSessionId = null;
         pushUi({ phase: 'error', error: String((err && err.message) || err) });
       });
     }
@@ -745,10 +760,15 @@ window.__ModuleLoader__.load({
       if (!spec || typeof spec !== 'object' || Array.isArray(spec)) throw new Error((field || 'presentation') + ' fehlt');
       var shape = String(spec.shape || 'note');
       var color = String(spec.color || '').trim();
-      var label = String(spec.label || '').trim();
+      // Presentation labels are optional. They may aid a generic caller, but
+      // must never be required merely to create a note: domain layers can
+      // retain their internal role while keeping the visible text exact.
+      var label = spec.label === undefined ? '' : String(spec.label).trim();
       var icon = spec.icon === undefined ? '' : String(spec.icon);
-      if (shape !== 'note' || !color || color.length > 40 || !label || label.length > 120 || icon.length > 12) throw new Error((field || 'presentation') + ' ist ungültig');
-      return { role: spec.role ? String(spec.role).slice(0, 40) : null, shape: shape, color: color, icon: icon, label: label };
+      var size = spec.size === undefined ? 'm' : String(spec.size);
+      if ((shape !== 'note' && shape !== 'text') || !color || color.length > 40 || label.length > 120 || icon.length > 12 || ['s', 'm', 'l', 'xl'].indexOf(size) < 0) throw new Error((field || 'presentation') + ' ist ungültig');
+      if (shape === 'text' && (label || icon)) throw new Error((field || 'presentation') + ' darf Text nicht praefixieren');
+      return { role: spec.role ? String(spec.role).slice(0, 40) : null, shape: shape, color: color, icon: icon, label: label, size: size };
     }
 
     function pageByName(editor, name) {
@@ -889,8 +909,22 @@ window.__ModuleLoader__.load({
       var style = presentationStyle(styleSpec, 'element.presentation');
       var meta = Object.assign({ actor: 'agent', actorLabel: 'DSH Whiteboard',
         presentationRole: style.role, renderKey: 'renderer:' + String(key), at: Date.now() }, extraMeta || {});
+      var prefix = [style.icon, style.label].filter(Boolean).join(' ');
+      var visibleText = prefix ? prefix + ': ' + String(text) : String(text);
       return { id: uniqueShapeId(mods), type: 'note', x: x, y: y,
-        props: { color: style.color, richText: toRichText(style.icon + ' ' + style.label + ': ' + String(text), href) }, meta: meta };
+        // Renderer-owned cards must not inherit whichever handwritten font the
+        // user last selected. An explicit neutral face keeps generated work
+        // visually coherent and its text metrics deterministic.
+        props: { color: style.color, font: 'sans', richText: toRichText(visibleText, href) }, meta: meta };
+    }
+
+    function renderStyledText(mods, styleSpec, text, x, y, key, extraMeta, href) {
+      var style = presentationStyle(styleSpec, 'element.presentation');
+      if (style.shape !== 'text') throw new Error('element.presentation ist kein Freitext');
+      var meta = Object.assign({ actor: 'agent', actorLabel: 'DSH Whiteboard',
+        presentationRole: style.role, renderKey: 'renderer:' + String(key), at: Date.now() }, extraMeta || {});
+      return { id: uniqueShapeId(mods), type: 'text', x: x, y: y,
+        props: { color: style.color, font: 'sans', size: style.size, autoSize: true, richText: toRichText(String(text), href) }, meta: meta };
     }
 
     function pageReference(mods, styleSpec, title, href, x, y, key) {
@@ -902,8 +936,11 @@ window.__ModuleLoader__.load({
       return 'renderer:link:' + String(link && link.from || '') + '>' + String(link && link.to || '') + ':' + String(link && link.label || '') + ':' + String(index);
     }
 
-    function shapeCopy(mods, source, styleSpec, x, y, key) {
-      var text = propsToText(source.props);
+    function shapeCopy(mods, source, styleSpec, x, y, key, textOverride) {
+      // A resolved caller may deliberately provide the visible text for an
+      // existing shape (for example a domain-owned legacy-label migration).
+      // The generic board neither interprets nor invents that text.
+      var text = textOverride === undefined ? propsToText(source.props) : String(textOverride);
       return renderStyledNote(mods, styleSpec, text, x, y, key, {
         sourceId: source.id, sourceText: text, sourceActor: source.meta && source.meta.actor || 'human'
       });
@@ -930,6 +967,21 @@ window.__ModuleLoader__.load({
           actor: 'agent', actorLabel: 'DSH Whiteboard', presentationRole: presentationStyle(styleSpec, 'element.presentation').role,
           renderKey: 'renderer:' + String(key), sourcePath: element.material.path
         } };
+    }
+
+    function reparentRenderedShapesIntoFrame(editor, frame, shapes) {
+      for (var i = 0; i < shapes.length; i++) {
+        var candidate = shapes[i];
+        if (!candidate || candidate.id === frame.id) continue;
+        var fresh = null;
+        try { fresh = editor.getShape(candidate.id); } catch (err) {}
+        if (!fresh || fresh.type === 'frame') continue;
+        editor.updateShapes([{
+          id: fresh.id, type: fresh.type, parentId: frame.id,
+          x: fresh.x - frame.x, y: fresh.y - frame.y,
+          meta: Object.assign({}, fresh.meta)
+        }]);
+      }
     }
 
     async function renderSemanticPlan(mods, editor, plan) {
@@ -988,7 +1040,12 @@ window.__ModuleLoader__.load({
         var presentationRole = String(detach[di].presentationRole || '');
         for (var si = 0; si < all.length; si++) {
           var sm = all[si].meta || {};
-          if (sm.actor === 'agent' && sm.presentationRole === presentationRole && String(sm.sourceText || '').toLowerCase() === match) addDetachId(all[si].id);
+          // sourceText identifies copied human content; renderer-created
+          // notes have no sourceText, so use their visible text as the safe
+          // fallback. Agent ownership and presentationRole still scope the
+          // deletion to the caller's explicit semantic replacement.
+          var candidateText = String(sm.sourceText || propsToText(all[si].props) || '').toLowerCase();
+          if (sm.actor === 'agent' && sm.presentationRole === presentationRole && candidateText === match) addDetachId(all[si].id);
         }
       }
       var created = [];
@@ -1003,6 +1060,7 @@ window.__ModuleLoader__.load({
       for (var oldIndex = 0; oldIndex < all.length; oldIndex++) {
         var oldMeta = all[oldIndex].meta || {};
         if (oldMeta.actor === 'agent' && renderKeys[oldMeta.renderKey]) addDetachId(all[oldIndex].id);
+        if (oldMeta.actor === 'agent' && String(oldMeta.renderKey || '').indexOf('renderer:layout-') === 0) addDetachId(all[oldIndex].id);
         // Link arrows created before renderKey was introduced are still
         // unambiguously renderer-owned by this generic actor/presentation
         // marker. Remove only that legacy subset during migration.
@@ -1024,19 +1082,37 @@ window.__ModuleLoader__.load({
       editor.run(function () {
         if (detachIds.length) editor.deleteShapes(detachIds);
         editor.createShapes([root]); created.push(root);
+        var template = String(plan.layout && plan.layout.template || 'learning_moment_workspace');
+        var labels = template === 'comparison' ? ['THESE', 'GEGENTHESE']
+          : template === 'pro_con' ? ['PRO', 'CONTRA']
+          : template === 'cause_effect' ? ['URSACHE', 'WIRKUNG'] : null;
+        if (labels) {
+          var headerY = root.y + 55, dividerY = root.y + 145, midX = root.x + root.props.w / 2;
+          var layoutHeadingStyle = { role: 'layout-heading', shape: 'text', color: 'black', size: 'l' };
+          var leftHeader = renderStyledText(mods, layoutHeadingStyle, labels[0], root.x + 210, headerY, 'layout-header-left', { layoutDecoration: true });
+          var rightHeader = renderStyledText(mods, layoutHeadingStyle, labels[1], root.x + 700, headerY, 'layout-header-right', { layoutDecoration: true });
+          var horizontal = { id: uniqueShapeId(mods), type: 'arrow', parentId: targetPage.id, x: root.x + 70, y: dividerY, props: { color: 'grey', start: { x: 0, y: 0 }, end: { x: root.props.w - 140, y: 0 }, text: '', arrowheadStart: 'none', arrowheadEnd: 'none' }, meta: { actor: 'agent', actorLabel: 'DSH Whiteboard', renderKey: 'renderer:layout-divider-horizontal', layoutDecoration: true } };
+          var vertical = { id: uniqueShapeId(mods), type: 'arrow', parentId: targetPage.id, x: midX, y: dividerY, props: { color: 'grey', start: { x: 0, y: 0 }, end: { x: 0, y: root.props.h - 205 }, text: '', arrowheadStart: 'none', arrowheadEnd: 'none' }, meta: { actor: 'agent', actorLabel: 'DSH Whiteboard', renderKey: 'renderer:layout-divider-vertical', layoutDecoration: true } };
+          editor.createShapes([leftHeader, rightHeader, horizontal, vertical]);
+          created.push(leftHeader, rightHeader, horizontal, vertical);
+        }
         for (var ei = 0; ei < elements.length; ei++) {
           var el = elements[ei];
           var style = presentationStyle(el.presentation, 'elements[' + ei + '].presentation');
           var x = style.role === 'anchor' ? 450 : 360 + (ei % 3) * 270;
           var y = style.role === 'anchor' ? 190 : 420 + Math.floor(ei / 3) * 230;
           var shape;
-          if (style.role === 'anchor') {
+          if (style.shape === 'text') {
+            if (el.source !== 'new' || typeof el.text !== 'string' || !el.text.trim()) throw new Error('Freitext muss neuer, nicht-leerer Text sein');
+            shape = renderStyledText(mods, style, el.text, x, y, el.key);
+          }
+          else if (style.role === 'anchor') {
             var anchorContent = el.source === 'existing'
               ? propsToText(sourceShapes[el.key].props)
               : el.text;
             shape = renderStyledNote(mods, style, anchorContent, x, y, el.key, { sourceId: el.ref && el.ref.id || null });
           }
-          else if (el.source === 'existing') shape = shapeCopy(mods, sourceShapes[el.key], style, x, y, el.key);
+          else if (el.source === 'existing') shape = shapeCopy(mods, sourceShapes[el.key], style, x, y, el.key, el.text);
           else if (el.source === 'material' && el.material.presentation === 'image') shape = imageShape(mods, editor, el, style, x, y, el.key);
           else if (el.source === 'material') shape = renderStyledNote(mods, style, el.material.label || el.material.path, x, y, el.key, { sourcePath: el.material.path }, el.material.href);
           else if (el.source === 'document') shape = renderStyledNote(mods, style, el.document.label || el.document.path || el.document.documentId, x, y, el.key, { documentId: el.document.documentId || null, sourcePath: el.document.path || null }, el.document.href);
@@ -1044,6 +1120,42 @@ window.__ModuleLoader__.load({
           shape.parentId = targetPage.id;
           editor.createShapes([shape]); created.push(shape); byKey[el.key] = shape;
         }
+        // Sticky notes auto-size from their contents. A fixed 230px row step
+        // overlaps long cards, so lay out the created shapes a row at a time
+        // using their real bounds. Four cards use two columns; larger plans
+        // retain the compact three-column layout.
+        var frameChildren = created.slice(1);
+        // Fixed generic templates: paired forms alternate left/right; a
+        // sequence/timeline is a horizontal reading order; matrix and cluster
+        // use a stable grid. The domain supplies content, never geometry.
+        var contentChildren = frameChildren.filter(function (shape) { return !(shape.meta && shape.meta.layoutDecoration); });
+        var paired = template === 'comparison' || template === 'pro_con' || template === 'cause_effect';
+        var horizontalFlow = template === 'sequence' || template === 'timeline';
+        var columns = paired ? 2 : (horizontalFlow ? Math.max(1, contentChildren.length) : (template === 'matrix' ? 3 : (template === 'cluster' ? 3 : (elements.length <= 4 ? 2 : 3))));
+        var noteWidth = 250, columnGap = 70;
+        var gridWidth = columns * noteWidth + (columns - 1) * columnGap;
+        var rowY = root.y + (labels ? 200 : 120);
+        for (var rowStart = 0; rowStart < contentChildren.length; rowStart += columns) {
+          var rowShapes = [];
+          for (var layoutIndex = rowStart; layoutIndex < Math.min(rowStart + columns, contentChildren.length); layoutIndex++) {
+            var freshShape = editor.getShape(contentChildren[layoutIndex].id);
+            if (!freshShape) throw new Error('Render-Zettel nicht verfügbar');
+            var x = root.x + Math.max(70, (root.props.w - gridWidth) / 2) + (layoutIndex - rowStart) * (noteWidth + columnGap);
+            editor.updateShapes([{ id: freshShape.id, type: freshShape.type, x: x, y: rowY }]);
+            rowShapes.push(editor.getShape(freshShape.id));
+          }
+          var rowBounds = boundsUnion(editor, rowShapes);
+          rowY = rowBounds.y + rowBounds.h + 70;
+        }
+        // Grow the frame before converting only renderer-owned cards to
+        // frame-local coordinates. Human shapes are deliberately excluded.
+        var requiredHeight = Math.max(root.props.h, rowY - root.y + 30);
+        var requiredWidth = horizontalFlow ? Math.max(root.props.w, 140 + contentChildren.length * (noteWidth + columnGap)) : root.props.w;
+        editor.updateShapes([{ id: root.id, type: 'frame', props: Object.assign({}, root.props, { w: requiredWidth, h: requiredHeight }) }]);
+        var freshRoot = editor.getShape(root.id);
+        if (!freshRoot) throw new Error('Render-Frame nicht verfügbar');
+        reparentRenderedShapesIntoFrame(editor, freshRoot, frameChildren);
+        editor.sendToBack([freshRoot.id]);
       });
       var targetRef = pageHash(targetPage.id);
       if (plan.overview && plan.overview.action === 'ensure_navigation_reference' && !samePage) {
@@ -1839,22 +1951,48 @@ window.__ModuleLoader__.load({
         ? props.useSessions(function (state) { return state && state.current ? String(state.current) : null; })
         : null;
       var sessionId = props && props.sessionId ? String(props.sessionId) : (hookSessionId || rootSessionId);
+      // The overlay can mount before DSH has rehydrated `state.current`.
+      // Keep the newest identity available to retries instead of treating an
+      // unscoped `openTab` call as a successful restore.
+      var activeSessionRef = React.useRef(sessionId || null);
+      activeSessionRef.current = sessionId || null;
 
       React.useEffect(function () {
         var opening = false;
+        var disposed = false;
         function openBoard(targetSessionId) {
-          if (opening || !sidebarRef.open) return false;
+          // `openTab()` without an identity can succeed while the session
+          // surface is still absent. That is not a usable board and must keep
+          // the reload retry alive until a concrete session exists.
+          if (!targetSessionId || opening || !sidebarRef.open) return false;
           opening = true;
           var opened = false;
-          try { opened = sidebarRef.open(TYPE_KIND, targetSessionId || sessionId) === true; } catch (err) {}
+          try { opened = sidebarRef.open(TYPE_KIND, targetSessionId) === true; } catch (err) {}
           if (opened) rememberBoardOpen();
           clientCtx.timeout(function () { opening = false; }, opened ? 1000 : 120);
           return opened;
         }
+        function retryUntilBoardBodyBinds(targetSessionId, attempts, onBound) {
+          if (disposed) return;
+          // `requestedSessionId` is set by the session-scoped BoardBody
+          // effect. It is the first observable proof that openTabIn reached
+          // the intended session surface; the controller return value alone
+          // is not sufficient during reload rehydration.
+          if (targetSessionId && requestedSessionId === targetSessionId) {
+            if (typeof onBound === 'function') onBound();
+            return;
+          }
+          var currentSessionId = targetSessionId || activeSessionRef.current;
+          if (currentSessionId) openBoard(currentSessionId);
+          if ((attempts || 0) < 120) {
+            clientCtx.timeout(function () {
+              retryUntilBoardBodyBinds(targetSessionId || activeSessionRef.current, (attempts || 0) + 1, onBound);
+            }, 100);
+          }
+        }
         function openPreferred(attempts) {
           if (readLocalStorage(OPEN_PREFERENCE_KEY) !== '1') return;
-          if (sidebarRef.open && openBoard()) return;
-          if ((attempts || 0) < 120) clientCtx.timeout(function () { openPreferred((attempts || 0) + 1); }, 100);
+          retryUntilBoardBodyBinds(activeSessionRef.current, attempts);
         }
         openPreferred(0);
         // One session-bound EventSource replaces the previous short-interval
@@ -1866,24 +2004,14 @@ window.__ModuleLoader__.load({
           var result;
           try { result = JSON.parse(event.data || '{}'); } catch (error) { return; }
           if (!result || !result.open) return;
-          var requestedSessionId = result.sessionId || sessionId || null;
-          function retryOpen(attempts) {
-            if (openBoard(requestedSessionId)) {
-              // The host keeps the request until the sidebar controller has
-              // accepted the open. This closes the retry window only after a
-              // real openTab call, not after a transient missing session
-              // surface error.
-              apiCall('wb-open-ack', { sessionId: requestedSessionId }).catch(function () {});
-              return;
-            }
-            // The shell overlay can render before the active session surface
-            // exists. Keep trying for the same bounded window as the host
-            // request instead of losing the one-shot event.
-            if ((attempts || 0) < 80) clientCtx.timeout(function () { retryOpen((attempts || 0) + 1); }, 100);
-          }
-          retryOpen(0);
+          var targetSessionId = result.sessionId || sessionId || null;
+          retryUntilBoardBodyBinds(targetSessionId, 0, function () {
+            // The host request is acknowledged only once the matching
+            // session-scoped BoardBody has actually mounted.
+            apiCall('wb-open-ack', { sessionId: targetSessionId }).catch(function () {});
+          });
         });
-        return function () { source.close(); };
+        return function () { disposed = true; source.close(); };
       }, [sessionId]);
       return React.createElement('button', {
         className: 'wb-opener',

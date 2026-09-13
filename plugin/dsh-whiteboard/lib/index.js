@@ -223,14 +223,12 @@ export function apply(ctx) {
     return seenAt > 0 && (Date.now() - seenAt) < 15000;
   }
 
-  function isBoardLive(boardId) {
-    const seenAt = state.lastSeenByBoard.get(boardId) || 0;
-    return seenAt > 0 && (Date.now() - seenAt) < 15000;
-  }
-
-  function isBoardConnected(boardId) {
-    const seenAt = state.lastConnectedByBoard.get(boardId) || 0;
-    return seenAt > 0 && (Date.now() - seenAt) < 15000;
+  function isSessionConnected(sessionId) {
+    // The command EventSource is the actual write path. Its subscriber stays
+    // registered until the HTTP connection closes, so an idle-but-open board
+    // must not become unavailable merely because its last content snapshot is
+    // older than the former 15-second freshness window.
+    return !!sessionId && !!state.commandSubscribers.get(sessionId)?.size;
   }
 
   function jsonRender(args, value) {
@@ -422,21 +420,21 @@ export function apply(ctx) {
     },
     {
       name: 'whiteboard_state',
-      description: 'Read the current live state of the shared tldraw whiteboard in the user\'s browser. Returns counts, notes (id, text, position, parentId, actor, proposal flag, movedBy), frames with memberIds, arrows, open cluster proposals, the CURRENT SELECTION of the human (selection: array of {id, kind, text}) and the active page (id/name/pageCount). Use the selection to see what the human is actively looking at. ALWAYS call this first, before any other whiteboard tool, and use the returned note ids/texts to reference existing ideas. Only the ACTIVE tldraw page is visible; page.pageCount tells you how many pages exist. live=false means the Whiteboard tab is not currently open in the browser; tell the user to open the "🧩 Whiteboard" tab.',
+      description: 'Read the current state of the shared tldraw whiteboard in the user\'s browser. Returns counts, notes (id, text, position, parentId, actor, proposal flag, movedBy), frames with memberIds, arrows, open cluster proposals, the CURRENT SELECTION of the human (selection: array of {id, kind, text}) and the active page (id/name/pageCount). Use the selection to see what the human is actively looking at. ALWAYS call this first, before any other whiteboard tool, and use the returned note ids/texts to reference existing ideas. Only the ACTIVE tldraw page is visible; page.pageCount tells you how many pages exist. live=true means this session has both a board snapshot and an open command channel, so writes can be delivered. live=false does not prove that a tab was closed; request opening before reporting a blocked board.',
       parameters: { type: 'object', properties: {} },
       output: outputObject,
       execute: async function (args, exec) {
         captureSession(exec);
         const board = boardForSession(state.sessionId);
         const snapshot = board ? (state.snapshots.get(board.boardId) || null) : null;
-        const connected = board ? isBoardConnected(board.boardId) : false;
-        const live = !!snapshot && board ? isBoardLive(board.boardId) : false;
+        const connected = isSessionConnected(state.sessionId);
+        const live = !!snapshot && !!board && connected;
         if (!snapshot || !live) {
           const hint = !snapshot && connected
             ? 'Whiteboard ist verbunden; der erste Live-Snapshot wird noch übertragen.'
             : !snapshot
               ? 'Kein Live-Snapshot. Der Mensch muss den Whiteboard-Tab in der DSH-Weboberfläche geöffnet haben.'
-              : 'Der letzte Live-Snapshot ist nicht mehr aktuell. Whiteboard bitte erneut öffnen.';
+              : 'Ein Board-Snapshot ist vorhanden, aber für diese Session besteht kein aktiver Schreibkanal. Whiteboard wird geöffnet.';
           return { live, connected, available: !!snapshot, snapshot, hint };
         }
         return lossless({
