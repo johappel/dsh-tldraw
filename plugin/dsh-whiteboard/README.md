@@ -4,6 +4,13 @@ Gemeinsames tldraw-Whiteboard für DeepSeek Harness (DSH) — als **Tab in der r
 
 > Aus dem Spike hervorgegangen (ursprünglich dynamisches Cordis-Plugin `tldraw-3`/pkg-23). Spike-Bericht: [`../../docs/SPIKE-REPORT.md`](../../docs/SPIKE-REPORT.md). Wiederverwendbarer Skill: `tldraw-plugin`.
 
+Verbindliche technische Regeln stehen in [`../../AGENTS.md`](../../AGENTS.md),
+der Laufzeitvertrag in [`../../docs/WHITEBOARD-SPEC.md`](../../docs/WHITEBOARD-SPEC.md)
+und die Test-/Browser-Abnahme in [`../../docs/TESTING.md`](../../docs/TESTING.md).
+Die upstream tldraw-Referenz ist unter
+[`../../docs/vendor/tldraw/llms-full.txt`](../../docs/vendor/tldraw/llms-full.txt)
+mit Herkunft und Hash versioniert.
+
 ## Funktionen
 
 - **Tab-Typ `whiteboard`** in der rechten Sidebar (`ctx.sidebarRightTabs` + keyed `sidebar.right.pane.tab`) — der Konversations-Stream bleibt sichtbar
