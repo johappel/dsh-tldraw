@@ -83,7 +83,10 @@ export function apply(ctx) {
         // With no session identity, fail closed when more than one session has
         // pending work; a browser must never open another workspace's board.
         if (!requestedSessionId) {
-          const pendingSessions = [...new Set(state.queue.map((command) => command.sessionId).filter(Boolean))];
+          const pendingSessions = [...new Set([
+            ...state.queue.map((command) => command.sessionId),
+            ...state.openRequests.keys()
+          ].filter(Boolean))];
           if (pendingSessions.length === 1 && state.openRequests.has(pendingSessions[0])) {
             state.openRequests.delete(pendingSessions[0]);
             return { open: true };
@@ -208,6 +211,18 @@ export function apply(ctx) {
   ctx.effect(() => dispose, 'dsh-whiteboard:api');
 
   const tools = [
+    {
+      name: 'whiteboard_request_open',
+      description: 'Internal host-to-browser signal: request that the session-bound Whiteboard tab is opened. This does not change board content and is hidden from the Companion.',
+      parameters: { type: 'object', properties: {} },
+      output: outputObject,
+      execute: async function (args, exec) {
+        captureSession(exec);
+        if (!state.sessionId) return { accepted: false, reason: 'sessionId fehlt' };
+        state.openRequests.set(state.sessionId, Date.now());
+        return { accepted: true, requested: true };
+      }
+    },
     {
       name: 'whiteboard_state',
       description: 'Read the current live state of the shared tldraw whiteboard in the user\'s browser. Returns counts, notes (id, text, position, parentId, actor, proposal flag, movedBy), frames with memberIds, arrows, open cluster proposals, the CURRENT SELECTION of the human (selection: array of {id, kind, text}) and the active page (id/name/pageCount). Use the selection to see what the human is actively looking at. ALWAYS call this first, before any other whiteboard tool, and use the returned note ids/texts to reference existing ideas. Only the ACTIVE tldraw page is visible; page.pageCount tells you how many pages exist. live=false means the Whiteboard tab is not currently open in the browser; tell the user to open the "🧩 Whiteboard" tab.',

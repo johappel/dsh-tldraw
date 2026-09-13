@@ -1284,6 +1284,7 @@ window.__ModuleLoader__.load({
       var sidebarExpanded = tabInfo && tabInfo.sidebar ? tabInfo.sidebar.expanded : null;
       var tabVisible = tabInfo && tabInfo.tab ? tabInfo.tab.visible : null;
       var key = 'dsh-whiteboard-' + (sessionId || 'shared');
+      var wasBoardOpen = React.useRef(false);
       if (!migrateFromKey) migrateFromKey = key;
 
       React.useEffect(function () {
@@ -1293,8 +1294,19 @@ window.__ModuleLoader__.load({
       }, [sessionId]);
 
       React.useEffect(function () {
-        if (sidebarExpanded === false || tabVisible === false) rememberBoardClosed();
-        else if (sidebarExpanded === true && tabVisible !== false) rememberBoardOpen();
+        var isOpen = sidebarExpanded === true && tabVisible !== false;
+        if (isOpen) {
+          // Mark the preference only after the tab is observably open. During
+          // reload the tab body can briefly receive the closed/unknown state;
+          // that transient lifecycle state must not erase the persisted
+          // preference before Opener gets a chance to reopen it.
+          wasBoardOpen.current = true;
+          rememberBoardOpen();
+        } else if (wasBoardOpen.current && (sidebarExpanded === false || tabVisible === false)) {
+          // A real close after an observed open is an explicit user choice.
+          wasBoardOpen.current = false;
+          rememberBoardClosed();
+        }
       }, [sidebarExpanded, tabVisible]);
 
       React.useEffect(function () {
@@ -1527,16 +1539,18 @@ window.__ModuleLoader__.load({
         var opening = false;
         var knownSession = sessionId || readLocalStorage(LAST_SESSION_KEY);
         function openBoard() {
-          if (opening || !sidebarRef.open) return;
+          if (opening || !sidebarRef.open) return false;
           opening = true;
-          rememberBoardOpen();
-          try { sidebarRef.open(TYPE_KIND); } catch (err) {}
-          clientCtx.timeout(function () { opening = false; }, 1000);
+          var opened = false;
+          try { opened = sidebarRef.open(TYPE_KIND) === true; } catch (err) {}
+          if (opened) rememberBoardOpen();
+          clientCtx.timeout(function () { opening = false; }, opened ? 1000 : 120);
+          return opened;
         }
         function openPreferred(attempts) {
           if (readLocalStorage(OPEN_PREFERENCE_KEY) !== '1') return;
-          if (sidebarRef.open) { openBoard(); return; }
-          if ((attempts || 0) < 40) clientCtx.timeout(function () { openPreferred((attempts || 0) + 1); }, 100);
+          if (sidebarRef.open && openBoard()) return;
+          if ((attempts || 0) < 120) clientCtx.timeout(function () { openPreferred((attempts || 0) + 1); }, 100);
         }
         openPreferred(0);
         var poll = setInterval(function () {
@@ -1602,7 +1616,13 @@ window.__ModuleLoader__.load({
         return;
       }
       sidebarRef.open = function (kind) {
-        try { sidebarRight.openTab(kind); } catch (err) { console.error('[dsh-whiteboard] openTab fehlgeschlagen', err); }
+        try { sidebarRight.openTab(kind); return true; } catch (err) {
+          // During the first shell render the controller exists before the
+          // session surface does. This is an expected retry condition, not a
+          // broken Whiteboard; keep other failures visible.
+          if (!String(err && err.message || err).includes('no session surface is mounted')) console.error('[dsh-whiteboard] openTab fehlgeschlagen', err);
+          return false;
+        }
       };
 
       ctx.effect(function () {
