@@ -45,6 +45,13 @@ node --test --test-isolation=none F:\code\pedagogical-thinking-space\tests\pts-w
 git diff --check
 ```
 
+Bei jeder Laufzeitänderung ist zusätzlich die Browser-E2E-Abnahme nach
+[`docs/TESTING.md`](docs/TESTING.md) auszuführen. Die Szenarien A–F sind
+keine optionalen manuellen Hinweise: A–E müssen gegen eine frisch gestartete
+Instanz protokolliert werden; F benötigt zusätzlich die menschliche
+Sichtprüfung der Bindung. Ein Unit- oder Syntax-Test darf nicht als E2E-
+Nachweis ausgegeben werden.
+
 Nach jeder statischen Client- oder Host-Änderung ist ein echter DSH-Neustart
 erforderlich; ein Browser-Reload allein lädt den Plugin-Code nicht neu.
 
@@ -72,4 +79,3 @@ nicht, dass eine bereits geöffnete Benutzerinstanz denselben Zustand hat.
   Snapshot-Inhalte in Logs, Commits oder Testberichten speichern.
 - Testdaten in `WB-Tests` ausdrücklich als Testartefakte kennzeichnen und nach
   der Abnahme nur nach klarer Zielbestimmung entfernen.
-
