@@ -1,9 +1,18 @@
 // dsh-whiteboard — Host half (ESM)
 // Converted from the dynamic spike plugin tldraw-3/pkg-23 (see ../../docs/SPIKE-REPORT.md)
 import path from 'node:path';
-import { boardIdForWorkspace, createSnapshotStore } from './snapshot-store.mjs';
+import { randomUUID } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
+import { boardIdForWorkspace, createWorkspaceSnapshotStore } from './snapshot-store.mjs';
 
 export const inject = ['webServer'];
+
+const pluginRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const browserRuntimeFiles = new Map([
+  ['/dsh-whiteboard/runtime.mjs', { path: path.join(pluginRoot, 'vendor', 'tldraw-runtime.mjs'), type: 'text/javascript; charset=utf-8' }],
+  ['/dsh-whiteboard/tldraw.css', { path: path.join(pluginRoot, 'vendor', 'tldraw.css'), type: 'text/css; charset=utf-8' }]
+]);
 
 export function apply(ctx) {
   const webServer = ctx.get('webServer');
@@ -14,9 +23,9 @@ export function apply(ctx) {
   const toolsReg = ctx.get('tools');
   const sessions = ctx.get('sessions');
   const dshHome = process.env.DSH_HOME || process.cwd();
-  const snapshotStore = createSnapshotStore({ root: path.join(dshHome, 'whiteboard-snapshots') });
+  const snapshotStore = createWorkspaceSnapshotStore({ legacyRoot: path.join(dshHome, 'whiteboard-snapshots') });
 
-  const state = { queue: [], snapshot: null, snapshots: new Map(), openRequests: new Map(), openSubscribers: new Map(), commandSubscribers: new Map(), lastCommandResults: [], lastSeenAt: 0, lastSeenBySession: new Map(), sessionId: null };
+  const state = { queue: [], snapshots: new Map(), openRequests: new Map(), openSubscribers: new Map(), commandSubscribers: new Map(), lastCommandResultsBySession: new Map(), lastSeenAt: 0, lastSeenBySession: new Map(), lastSeenByBoard: new Map(), lastConnectedByBoard: new Map(), sessionId: null };
 
   function pendingOpenResult(requestedSessionId) {
     const now = Date.now();
@@ -82,12 +91,19 @@ export function apply(ctx) {
       const cwd = session?.header?.cwd;
       if (cwd) return String(cwd);
     } catch (error) {}
-    return process.cwd();
+    // A board is a workspace resource. Never turn an unknown session into
+    // the host process cwd: that could expose another workspace's board.
+    return null;
   }
 
   function boardForSession(sessionId) {
     const workspace = workspaceForSession(sessionId);
-    return { boardId: boardIdForWorkspace(workspace), workspace };
+    return workspace ? { boardId: boardIdForWorkspace(workspace), workspace } : null;
+  }
+
+  function normalizeSessionId(value) {
+    const id = value ? String(value).replace(/^dsh-whiteboard-/, '') : '';
+    return id || null;
   }
 
   function captureSession(exec) {
@@ -96,8 +112,14 @@ export function apply(ctx) {
     } catch (e) {}
   }
 
+  function commandIdFrom(value) {
+    const id = typeof value === 'string' ? value.trim() : '';
+    return /^[A-Za-z0-9._:-]{1,120}$/.test(id) ? id : randomUUID();
+  }
+
   function pushCommand(op, extra) {
-    const cmd = { op, at: Date.now(), sessionId: state.sessionId };
+    const commandId = commandIdFrom(extra && extra.commandId);
+    const cmd = { commandId, op, at: Date.now(), sessionId: state.sessionId };
     if (extra && typeof extra === 'object') {
       for (const k of Object.keys(extra)) {
         const v = extra[k];
@@ -107,15 +129,16 @@ export function apply(ctx) {
     state.queue.push(cmd);
     requestOpen(state.sessionId);
     notifyCommandSubscribers(state.sessionId);
-    return { accepted: true, op, pending: state.queue.length };
+    return { accepted: true, op, commandId, pending: state.queue.length };
   }
 
   async function dispatch(method, args) {
     switch (method) {
       case 'wb-board': {
-        const sessionId = args && args.sessionId ? String(args.sessionId).replace(/^dsh-whiteboard-/, '') : null;
+        const sessionId = normalizeSessionId(args && args.sessionId);
         const board = boardForSession(sessionId);
-        const record = await snapshotStore.load(board.boardId);
+        if (!board) return { ok: false, error: 'Session oder Workspace nicht gefunden' };
+        const record = await snapshotStore.load(board);
         return {
           ok: true,
           boardId: board.boardId,
@@ -125,10 +148,14 @@ export function apply(ctx) {
         };
       }
       case 'wb-session-key':
+        {
+        const board = boardForSession(state.sessionId);
         return {
-          key: state.sessionId ? 'dsh-whiteboard-' + state.sessionId : null,
+          key: board ? 'dsh-whiteboard-board-' + board.boardId : null,
+          boardId: board?.boardId || null,
           sessionId: state.sessionId
         };
+        }
       case 'wb-open-ack': {
         const acknowledgedSessionId = args && args.sessionId ? String(args.sessionId).replace(/^dsh-whiteboard-/, '') : null;
         if (acknowledgedSessionId) state.openRequests.delete(acknowledgedSessionId);
@@ -137,37 +164,51 @@ export function apply(ctx) {
       case 'wb-poll':
         state.lastSeenAt = Date.now();
         {
-          const requestedSessionId = args && args.sessionId ? String(args.sessionId).replace(/^dsh-whiteboard-/, '') : null;
+          const requestedSessionId = normalizeSessionId(args && args.sessionId);
           if (requestedSessionId) state.lastSeenBySession.set(requestedSessionId, Date.now());
           return { commands: takeCommands(requestedSessionId) };
         }
       case 'wb-snapshot':
         state.lastSeenAt = Date.now();
         if (!args || typeof args !== 'object') return { ok: false };
+        {
+        const snapshotSessionId = normalizeSessionId(args.sessionId) || state.sessionId;
+        const board = boardForSession(snapshotSessionId);
+        if (!board) return { ok: false, error: 'Session oder Workspace nicht gefunden' };
         const snapshot = {
           counts: args.counts || null,
+          elements: Array.isArray(args.elements) ? args.elements : [],
           notes: Array.isArray(args.notes) ? args.notes : [],
           frames: Array.isArray(args.frames) ? args.frames : [],
           arrows: Array.isArray(args.arrows) ? args.arrows : [],
           proposals: Array.isArray(args.proposals) ? args.proposals : [],
           selection: Array.isArray(args.selection) ? args.selection : [],
-          page: args.page || null
+          page: args.page || null,
+          commandResults: Array.isArray(args.commandResults) ? args.commandResults.slice(-10) : []
         };
-        const snapshotSessionId = args.sessionId ? String(args.sessionId).replace(/^dsh-whiteboard-/, '') : state.sessionId;
         if (snapshotSessionId) {
-          state.snapshots.set(snapshotSessionId, snapshot);
+          // Content belongs to the workspace board. Command acknowledgements
+          // remain session-local because they describe one delivery channel.
+          state.snapshots.set(board.boardId, { ...snapshot, commandResults: [] });
           state.lastSeenBySession.set(snapshotSessionId, Date.now());
+          state.lastSeenByBoard.set(board.boardId, Date.now());
+          state.lastCommandResultsBySession.set(snapshotSessionId, snapshot.commandResults);
         }
-        state.snapshot = snapshot;
-        state.lastCommandResults = Array.isArray(args.commandResults) ? args.commandResults.slice(-10) : [];
         return { ok: true };
+        }
       case 'wb-save': {
         const boardId = args && args.boardId ? String(args.boardId) : '';
+        const sessionId = normalizeSessionId(args && args.sessionId);
+        const board = boardForSession(sessionId);
         const expectedVersion = Number.isInteger(args?.expectedVersion) && args.expectedVersion >= 0 ? args.expectedVersion : -1;
-        if (expectedVersion < 0 || !args?.snapshot || typeof args.snapshot !== 'object') {
-          return { ok: false, error: 'boardId, expectedVersion und snapshot sind erforderlich' };
+        if (!board) return { ok: false, error: 'Session oder Workspace nicht gefunden' };
+        if (board.boardId !== boardId) {
+          return { ok: false, error: 'Board gehört nicht zum Session-Workspace' };
         }
-        return snapshotStore.save(boardId, expectedVersion, args.snapshot);
+        if (expectedVersion < 0 || !args?.snapshot || typeof args.snapshot !== 'object') {
+          return { ok: false, error: 'boardId, sessionId, expectedVersion und snapshot sind erforderlich' };
+        }
+        return snapshotStore.save(board, expectedVersion, args.snapshot);
       }
       default:
         return { error: 'unknown method: ' + method };
@@ -179,6 +220,16 @@ export function apply(ctx) {
     const seenAt = sessionId
       ? (state.lastSeenBySession.get(sessionId) || 0)
       : state.lastSeenAt;
+    return seenAt > 0 && (Date.now() - seenAt) < 15000;
+  }
+
+  function isBoardLive(boardId) {
+    const seenAt = state.lastSeenByBoard.get(boardId) || 0;
+    return seenAt > 0 && (Date.now() - seenAt) < 15000;
+  }
+
+  function isBoardConnected(boardId) {
+    const seenAt = state.lastConnectedByBoard.get(boardId) || 0;
     return seenAt > 0 && (Date.now() - seenAt) < 15000;
   }
 
@@ -251,12 +302,40 @@ export function apply(ctx) {
   });
   ctx.effect(() => dispose, 'dsh-whiteboard:api');
 
+  // Serve a closed set of local runtime assets. The board must not depend on
+  // an unrelated public CDN merely to mount its editor.
+  const disposeRuntime = webServer.register({
+    kind: 'prefix',
+    // The DSH prefix router matches only `path` or `path + '/'`. Runtime
+    // filenames have extensions, so register the common namespace; the
+    // longer API/event prefixes continue to win route selection.
+    path: '/dsh-whiteboard',
+    handler(req, res) {
+      const pathname = new URL(req.url || '/', 'http://127.0.0.1').pathname;
+      const file = browserRuntimeFiles.get(pathname);
+      if (!file) {
+        res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+        res.end('not found');
+        return;
+      }
+      readFile(file.path).then((body) => {
+        res.writeHead(200, { 'Content-Type': file.type, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
+        res.end(body);
+      }).catch((error) => {
+        console.error('[dsh-whiteboard] local runtime unavailable', error);
+        res.writeHead(503, { 'Content-Type': 'text/plain; charset=utf-8' });
+        res.end('whiteboard runtime unavailable');
+      });
+    }
+  });
+  ctx.effect(() => disposeRuntime, 'dsh-whiteboard:runtime');
+
   const disposeOpenEvents = webServer.register({
     kind: 'prefix',
     path: '/dsh-whiteboard/open-events',
     handler(req, res) {
       const requestUrl = new URL(req.url || '/', 'http://127.0.0.1');
-      const sessionId = String(requestUrl.searchParams.get('sessionId') || '').replace(/^dsh-whiteboard-/, '');
+      const sessionId = normalizeSessionId(requestUrl.searchParams.get('sessionId'));
       // A stream without identity must never receive an event for another
       // workspace. The client recreates this stream once its session surface
       // is available.
@@ -294,7 +373,7 @@ export function apply(ctx) {
     path: '/dsh-whiteboard/command-events',
     handler(req, res) {
       const requestUrl = new URL(req.url || '/', 'http://127.0.0.1');
-      const sessionId = String(requestUrl.searchParams.get('sessionId') || '').replace(/^dsh-whiteboard-/, '');
+      const sessionId = normalizeSessionId(requestUrl.searchParams.get('sessionId'));
       if (!sessionId) {
         res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
         res.end('sessionId required');
@@ -302,6 +381,8 @@ export function apply(ctx) {
       }
       state.lastSeenAt = Date.now();
       state.lastSeenBySession.set(sessionId, Date.now());
+      const board = boardForSession(sessionId);
+      if (board) state.lastConnectedByBoard.set(board.boardId, Date.now());
       res.writeHead(200, {
         'Content-Type': 'text/event-stream; charset=utf-8',
         'Cache-Control': 'no-cache, no-transform',
@@ -346,11 +427,25 @@ export function apply(ctx) {
       output: outputObject,
       execute: async function (args, exec) {
         captureSession(exec);
-        const snapshot = state.sessionId ? (state.snapshots.get(state.sessionId) || null) : null;
-        if (!snapshot || !isLive(state.sessionId)) {
-          return { live: isLive(state.sessionId), available: !!snapshot, snapshot, hint: 'Kein Live-Snapshot. Der Mensch muss den Whiteboard-Tab in der DSH-Weboberfläche geöffnet haben.' };
+        const board = boardForSession(state.sessionId);
+        const snapshot = board ? (state.snapshots.get(board.boardId) || null) : null;
+        const connected = board ? isBoardConnected(board.boardId) : false;
+        const live = !!snapshot && board ? isBoardLive(board.boardId) : false;
+        if (!snapshot || !live) {
+          const hint = !snapshot && connected
+            ? 'Whiteboard ist verbunden; der erste Live-Snapshot wird noch übertragen.'
+            : !snapshot
+              ? 'Kein Live-Snapshot. Der Mensch muss den Whiteboard-Tab in der DSH-Weboberfläche geöffnet haben.'
+              : 'Der letzte Live-Snapshot ist nicht mehr aktuell. Whiteboard bitte erneut öffnen.';
+          return { live, connected, available: !!snapshot, snapshot, hint };
         }
-        return lossless({ live: true, available: true, snapshot, lastCommandResults: state.lastCommandResults });
+        return lossless({
+          live: true,
+          connected: true,
+          available: true,
+          snapshot: { ...snapshot, commandResults: state.lastCommandResultsBySession.get(state.sessionId) || [] },
+          lastCommandResults: state.lastCommandResultsBySession.get(state.sessionId) || []
+        });
       }
     },
     {
@@ -561,6 +656,7 @@ export function apply(ctx) {
         properties: {
           op: { type: 'string', description: 'Must be render-plan.' },
           version: { type: 'string' },
+          commandId: { type: 'string', maxLength: 120, description: 'Idempotency-/Bestätigungs-ID für eine Nachlieferung.' },
           plan: { type: 'object' },
           capabilities: { type: 'array', items: { type: 'string' } }
         },
@@ -572,7 +668,12 @@ export function apply(ctx) {
         if (!args || args.op !== 'render-plan' || !args.plan || typeof args.plan !== 'object') {
           return { accepted: false, reason: 'render-plan und plan sind erforderlich' };
         }
-        return pushCommand('render-plan', { version: args.version || '1', plan: args.plan, capabilities: Array.isArray(args.capabilities) ? args.capabilities.slice(0, 40) : [] });
+        return pushCommand('render-plan', {
+          commandId: args.commandId,
+          version: args.version || '1',
+          plan: args.plan,
+          capabilities: Array.isArray(args.capabilities) ? args.capabilities.slice(0, 40) : []
+        });
       }
     }
   ];

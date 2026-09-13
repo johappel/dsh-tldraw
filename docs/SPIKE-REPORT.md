@@ -88,7 +88,13 @@ Die ältere DSH-Version hatte `conversation.view` (Tab) und `details` (rechte Sp
 `ctx.get('sidebarRightTabs')` ist beim ersten `apply` oft `undefined`, wenn das Sidebar-Paket später lädt → nichts wird registriert (stiller Fehlschlag). Fix: `inject: ['slots', 'sidebarRightTabs', 'sidebarRight']` — Cordis wartet und wendet erneut an.
 
 ### 3.8 Command-Queue × Client-Update
-Befehle aus der Warteschlange können vom alten Client-Code ausgeführt werden, bevor die neue Version lädt (Crash-Gefahr). Der aktuelle Client nutzt dafür sessiongebundene Event-Streams; Queue und Client bleiben weiterhin generische Seams.
+Befehle aus der Warteschlange können während des asynchronen Ladens von React
+und tldraw eintreffen. Der aktuelle Client puffert diese Events bis Editor und
+Server-Hydration bereit sind. Jeder Befehl trägt eine sessiongebundene
+`commandId`; nach der Ausführung meldet der Client diese ID im Folge-Snapshot
+als `ok: true` oder `ok: false`. Eine bereits erfolgreiche ID wird bei einer
+Nachlieferung idempotent ignoriert. Die generische Queue bleibt damit ein
+Transport-Seam, nicht die Erfolgsmeldung.
 
 ### 3.9 Knopf-Interaktion: der Agent startet sich nicht selbst
 Board-Änderungen lösen **keinen** Agenten-Turn aus — es gibt kein Board-Event, das auf die Konversation wirkt; der **Mensch bleibt der Auslöser**. Verifizierter Weg aus dem Tab-Body heraus: Standard-Prop `inputActions` → `setDraft(prompt)` und ~60 ms später `submit()`. Ein Turn entsteht damit genau so, als hätte der Mensch getippt.
@@ -129,7 +135,9 @@ protokollieren.
 ## 7. Offene Punkte
 
 1. **Pfeil-Bindungen**: per Store-Scan bestätigt (5/5 Pfeile mit `binding`-Records, `getBindingsFromShape` in 3.15.6 unzuverlässig); der visuelle Test (Zettel ziehen → Pfeil folgt) bleibt ein menschlicher Blick.
-2. **Command-Queue an Package-Version binden** (oder Event-Sync).
+2. **Browser-E2E für Ack und Nacharbeit:** frühes Event, fehlendes Ack,
+   negativer Client-Befehl und sessiongebundene Fremdsession müssen nach dem
+   nächsten Neustart live protokolliert werden.
 3. **Gezielter Zugriff auf nicht-aktive tldraw-Seiten** (aktuell nur die aktive Seite).
 4. **Details-Spaltenbreite**: entfällt — die neue Sidebar bringt Docken/Splitten/Fullscreen selbst mit.
 5. **`whiteboard_move_into_frame`**: Zettel, die außerhalb jedes Frames liegen (aktuell 3 Agenten-Zettel rechts von „Guter Unterricht"), in einem Undo-Schritt verschieben **und** reparenten — bisher nur über `arrange-sequence` (legt neu an) oder manuell.

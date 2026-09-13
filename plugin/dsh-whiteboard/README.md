@@ -51,7 +51,7 @@ Patch-Eintrag löschen, Junction entfernen, DSH neu starten.
 
 | Hälfte | Ort | Rolle |
 |---|---|---|
-| Host | `lib/index.js` (ESM) | HTTP-API `/dsh-whiteboard/api` (`wb-poll`, `wb-snapshot`, `wb-board`, `wb-save`), generischer Snapshot-Store unter `$DSH_HOME/whiteboard-snapshots`, Tool-Registrierung über `tools`-Service |
+| Host | `lib/index.js` (ESM) | HTTP-API `/dsh-whiteboard/api` (`wb-poll`, `wb-snapshot`, `wb-board`, `wb-save`), generischer Snapshot-Store je Workspace unter `.dsh-whiteboard/snapshot.json` (mit einmaliger Kopie aus dem alten zentralen Store), Tool-Registrierung über `tools`-Service |
 | Client | `lib/client.js` (Classic Script) | Tab-Typ + Tab-Körper, eine tldraw-5.4.2-Instanz (esm.sh), sessiongebundene Event-Streams und Store-Listener, Öffner-Chip |
 
 **Registrierung (zweistufig):**

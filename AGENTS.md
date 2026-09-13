@@ -10,7 +10,9 @@ gehören in `F:\code\pedagogical-thinking-space`.
   ESM im DSH-Prozess, `lib/client.js` ist ein Classic Script im Browser.
 - Der Client verwendet genau eine tldraw-Instanz pro Session. Den globalen
   Host-DOM-Knoten nur per `appendChild` umhängen, niemals per React-Unmount.
-- Session-ID und Workspace müssen aus dem Host-/Session-Kontext stammen. Keine
+- Session-ID und Workspace müssen aus dem Host-/Session-Kontext stammen. Die
+  Board-ID und der tldraw-Persistence-Key sind workspacegebunden; die Session
+  identifiziert nur Live-Kanal und Auftrag. Keine
   globale oder geratene Fallback-ID verwenden, wenn dadurch ein fremdes Board
   sichtbar werden könnte.
 - `whiteboard_state`, Primitive und `whiteboard_render_plan` bleiben interne

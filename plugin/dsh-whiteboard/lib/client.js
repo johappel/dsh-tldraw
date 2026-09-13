@@ -12,10 +12,7 @@ window.__ModuleLoader__.load({
     var TYPE_KIND = 'whiteboard';
     var OPEN_PREFERENCE_KEY = 'dsh-whiteboard:open-preference';
     var LAST_SESSION_KEY = 'dsh-whiteboard:last-session';
-    var CSS_URLS = [
-      'https://cdn.jsdelivr.net/npm/tldraw@' + TL_VERSION + '/tldraw.css',
-      'https://unpkg.com/tldraw@' + TL_VERSION + '/tldraw.css'
-    ];
+    var CSS_URLS = ['/dsh-whiteboard/tldraw.css'];
     var API_BASE = '/dsh-whiteboard/api';
     var OPEN_EVENTS_URL = '/dsh-whiteboard/open-events';
     var COMMAND_EVENTS_URL = '/dsh-whiteboard/command-events';
@@ -26,6 +23,8 @@ window.__ModuleLoader__.load({
     var boardHost = null;
     var boardRoot = null;
     var boardKey = null;
+    var boardSessionId = null;
+    var requestedSessionId = null;
     var serverBoardId = null;
     var serverVersion = 0;
     var serverReady = false;
@@ -42,6 +41,11 @@ window.__ModuleLoader__.load({
 
     var clientCtx = { timeout: function (fn, ms) { return setTimeout(fn, ms); } };
     var commandConsumer = null;
+    // The host removes queued commands when the command EventSource connects.
+    // tldraw/React modules load asynchronously, so an event can arrive before
+    // the editor-side consumer exists. Retain it until the consumer is ready.
+    var deferredCommandEvents = [];
+    var completedCommandIds = Object.create(null);
 
     function readLocalStorage(key) {
       try { return window.localStorage.getItem(key); } catch (err) { return null; }
@@ -95,8 +99,34 @@ window.__ModuleLoader__.load({
       return request();
     }
 
+    function retryDelay(attempt) {
+      return new Promise(function (resolve) {
+        clientCtx.timeout(resolve, Math.min(750, 150 + attempt * 100));
+      });
+    }
+
+    // During a DSH reload the session registry and the web route do not become
+    // available at exactly the same time. Retry only the active board lookup;
+    // this is not an idle poll and it never selects a fallback workspace.
+    function boardApiCall(sessionId, attempts) {
+      var attempt = attempts || 0;
+      return apiCall('wb-board', { sessionId: sessionId }).then(function (remote) {
+        if (remote && remote.ok === true && remote.boardId) return remote;
+        if (attempt < 10 && remote && remote.ok === false && /Session|Workspace|Whiteboard/i.test(String(remote.error || ''))) {
+          return retryDelay(attempt).then(function () { return boardApiCall(sessionId, attempt + 1); });
+        }
+        throw new Error(remote && remote.error || 'Whiteboard-Workspace konnte nicht aufgelöst werden');
+      }).catch(function (error) {
+        var message = String(error && error.message || error || '');
+        if (attempt < 10 && /HTTP (401|404|408|425|429|500|502|503|504)|NetworkError|Failed to fetch|Load failed|network request failed/i.test(message)) {
+          return retryDelay(attempt).then(function () { return boardApiCall(sessionId, attempt + 1); });
+        }
+        throw error;
+      });
+    }
+
     function activeSessionId() {
-      return boardKey && String(boardKey).indexOf('dsh-whiteboard-') === 0 ? String(boardKey).slice('dsh-whiteboard-'.length) : null;
+      return boardSessionId;
     }
 
     function getTldrawSnapshot(mods, editor) {
@@ -119,16 +149,94 @@ window.__ModuleLoader__.load({
       return false;
     }
 
+    function resolveBoardIdentity(sessionId) {
+      if (!sessionId) return Promise.reject(new Error('Whiteboard-Session fehlt'));
+      return boardApiCall(sessionId).then(function (remote) {
+        if (!/^workspace-[a-f0-9]{32}$/.test(String(remote.boardId || ''))) {
+          throw new Error('Whiteboard-Workspace konnte nicht aufgelöst werden');
+        }
+        return {
+          boardId: String(remote.boardId),
+          persistenceKey: 'dsh-whiteboard-board-' + String(remote.boardId)
+        };
+      });
+    }
+
+    function dedupeRendererSnapshot(snapshot) {
+      if (!snapshot || typeof snapshot !== 'object') return { snapshot: snapshot, removed: 0 };
+      var copy;
+      try { copy = JSON.parse(JSON.stringify(snapshot)); } catch (error) { return { snapshot: snapshot, removed: 0 }; }
+      var store = copy && copy.document && copy.document.store;
+      if (!store || typeof store !== 'object' || Array.isArray(store)) return { snapshot: copy, removed: 0 };
+      var records = Object.keys(store).map(function (key) { return store[key]; }).filter(Boolean);
+      var byRenderKey = {};
+      for (var i = 0; i < records.length; i++) {
+        var record = records[i];
+        if (record.typeName !== 'shape' || !record.meta || record.meta.actor !== 'agent' || !record.meta.renderKey) continue;
+        var key = String(record.meta.renderKey);
+        if (!byRenderKey[key]) byRenderKey[key] = [];
+        byRenderKey[key].push(record);
+      }
+      var removedIds = Object.create(null);
+      Object.keys(byRenderKey).forEach(function (key) {
+        var group = byRenderKey[key].slice().sort(function (a, b) {
+          return Number(a.meta && a.meta.at || 0) - Number(b.meta && b.meta.at || 0);
+        });
+        for (var n = 0; n < group.length - 1; n++) removedIds[group[n].id] = true;
+      });
+      // A frame deletion cascades in tldraw. Remove a duplicate frame only
+      // when all of its children are renderer-owned; remove those children in
+      // the same normalization pass. A human/unknown child keeps its frame.
+      for (var r = 0; r < records.length; r++) {
+        var frame = records[r];
+        if (!removedIds[frame.id] || frame.type !== 'frame') continue;
+        var rendererChildren = [];
+        var safe = true;
+        for (var c = 0; c < records.length; c++) {
+          if (records[c].parentId !== frame.id) continue;
+          var childMeta = records[c].meta || {};
+          if (records[c].typeName !== 'shape' || childMeta.actor !== 'agent' || String(childMeta.renderKey || '').indexOf('renderer:') !== 0) {
+            safe = false;
+            break;
+          }
+          rendererChildren.push(records[c].id);
+        }
+        if (!safe) delete removedIds[frame.id];
+        else for (var rc = 0; rc < rendererChildren.length; rc++) removedIds[rendererChildren[rc]] = true;
+      }
+      var removed = 0;
+      Object.keys(removedIds).forEach(function (id) {
+        if (store[id]) { delete store[id]; removed++; }
+      });
+      if (removed) {
+        Object.keys(store).forEach(function (id) {
+          var record = store[id];
+          if (record && record.typeName === 'binding' && (removedIds[record.fromId] || removedIds[record.toId])) delete store[id];
+        });
+      }
+      return { snapshot: copy, removed: removed };
+    }
+
+    function allDocumentShapes(editor) {
+      try {
+        if (editor && editor.store && typeof editor.store.allRecords === 'function') {
+          return (editor.store.allRecords() || []).filter(function (record) { return record && record.typeName === 'shape'; });
+        }
+      } catch (error) {}
+      try { return editor && typeof editor.getCurrentPageShapes === 'function' ? editor.getCurrentPageShapes() || [] : []; } catch (error2) { return []; }
+    }
+
     function hydrateFromServer(editor, mods) {
       serverReady = false;
       serverPersistenceEnabled = false;
       serverRetryRequested = false;
-      return apiCall('wb-board', { sessionId: activeSessionId() }).then(function (remote) {
-        if (!remote || remote.ok !== true || !remote.boardId) throw new Error('Whiteboard-Store liefert keine Board-ID');
+      return boardApiCall(activeSessionId()).then(function (remote) {
         serverBoardId = String(remote.boardId);
         serverVersion = Number.isInteger(remote.version) && remote.version >= 0 ? remote.version : 0;
         var localSnapshot = getTldrawSnapshot(mods, editor);
-        var remoteSnapshot = remote.snapshot;
+        var normalized = dedupeRendererSnapshot(remote.snapshot);
+        var remoteSnapshot = normalized.snapshot;
+        if (normalized.removed) pushActivity('🧹 ' + normalized.removed + ' alte Renderer-Duplikate bereinigt');
         if (snapshotHasContent(remoteSnapshot)) {
           var loaded = mods.tldraw.loadSnapshot(editor.store, remoteSnapshot);
           return Promise.resolve(loaded).then(function () {
@@ -136,7 +244,7 @@ window.__ModuleLoader__.load({
           });
         }
         if (snapshotHasContent(localSnapshot)) {
-          return apiCall('wb-save', { boardId: serverBoardId, expectedVersion: serverVersion, snapshot: localSnapshot }).then(function (saved) {
+          return apiCall('wb-save', { boardId: serverBoardId, sessionId: activeSessionId(), expectedVersion: serverVersion, snapshot: localSnapshot }).then(function (saved) {
             if (!saved || saved.ok !== true) throw new Error(saved && saved.conflict ? 'Konflikt beim ersten Whiteboard-Speichern' : 'Whiteboard-Stand konnte nicht gespeichert werden');
             serverVersion = saved.version;
             pushActivity('☁️ vorhandenen lokalen Whiteboard-Stand gespeichert');
@@ -147,8 +255,9 @@ window.__ModuleLoader__.load({
         serverReady = true;
         serverPersistenceEnabled = true;
       }).catch(function (error) {
-        serverReady = true;
+        serverReady = false;
         serverPersistenceEnabled = false;
+        pushUi({ phase: 'error', error: 'Server-Persistenz nicht verfügbar: ' + truncate(error && error.message || error, 120) });
         pushActivity('⚠️ Server-Persistenz nicht verfügbar: ' + truncate(error && error.message || error, 120));
         console.error('[dsh-whiteboard] server snapshot load failed', error);
       });
@@ -163,6 +272,7 @@ window.__ModuleLoader__.load({
       }
       return apiCall('wb-save', {
         boardId: serverBoardId,
+        sessionId: activeSessionId(),
         expectedVersion: serverVersion,
         snapshot: fullSnapshot
       }).then(function (saved) {
@@ -221,12 +331,17 @@ window.__ModuleLoader__.load({
     function loadModules() {
       if (modulesPromise) return modulesPromise;
       var importFn = new Function('u', 'return' + ' import(u)');
-      modulesPromise = Promise.all([
-        importFn('https://esm.sh/react@18.3.1'),
-        importFn('https://esm.sh/react-dom@18.3.1/client?deps=react@18.3.1,react-dom@18.3.1'),
-        importFn('https://esm.sh/tldraw@' + TL_VERSION + '?deps=react@18.3.1,react-dom@18.3.1')
-      ]).then(function (mods) {
-        loadedModules = { react: mods[0], reactDomClient: mods[1], tldraw: mods[2] };
+      function importWithTimeout(url, timeoutMs) {
+        return Promise.race([
+          importFn(url),
+          new Promise(function (_, reject) {
+            clientCtx.timeout(function () { reject(new Error('Whiteboard-Runtime hat nicht innerhalb von ' + Math.round(timeoutMs / 1000) + ' Sekunden geladen')); }, timeoutMs);
+          })
+        ]);
+      }
+      modulesPromise = importWithTimeout('/dsh-whiteboard/runtime.mjs', 12000).then(function (mods) {
+        if (!mods || !mods.react || !mods.reactDomClient || !mods.tldraw) throw new Error('Lokale Whiteboard-Runtime ist unvollständig');
+        loadedModules = { react: mods.react, reactDomClient: mods.reactDomClient, tldraw: mods.tldraw };
         return loadedModules;
       }).catch(function (err) {
         modulesPromise = null;
@@ -236,10 +351,28 @@ window.__ModuleLoader__.load({
       return modulesPromise;
     }
 
+    function resetMountedBoard() {
+      try { if (boardRoot) boardRoot.unmount(); } catch (err) {}
+      boardRoot = null;
+      editorHolder.editor = null;
+      boardKey = null;
+      boardSessionId = null;
+      serverBoardId = null;
+      serverVersion = 0;
+      serverReady = false;
+      serverPersistenceEnabled = false;
+      serverRetryRequested = false;
+      migrateFromKey = null;
+      migrationLastKey = null;
+      migrationRunning = false;
+      uiState = { counts: { notes: 0, human: 0, agent: 0, proposals: 0 }, notes: [], proposals: [], selection: [], activity: [], phase: 'loading', error: '' };
+      pushUi();
+    }
+
     // tldraw must never mount into a 0-px / display:none container: its text
     // measurement throws (`measureElementTextNodeSpans`) as soon as geometry is
     // computed. Wait until the seat is really laid out.
-    function initBoardWhenVisible(getContainer, persistenceKey, attempts) {
+    function initBoardWhenVisible(getContainer, persistenceKey, sessionId, attempts) {
       var tries = attempts || 0;
       var el = getContainer();
       var ready = el && (function () {
@@ -247,11 +380,21 @@ window.__ModuleLoader__.load({
         return r.width >= 80 && r.height >= 80;
       })();
       if (!ready) {
-        if (tries < 200) clientCtx.timeout(function () { initBoardWhenVisible(getContainer, persistenceKey, tries + 1); }, 120);
+        if (tries < 200) {
+          clientCtx.timeout(function () { initBoardWhenVisible(getContainer, persistenceKey, sessionId, tries + 1); }, 120);
+        } else if (requestedSessionId === sessionId && !boardRoot && !editorHolder.editor) {
+          // A hidden or zero-sized sidebar seat cannot safely host tldraw.
+          // Do not leave the person with a permanent loader: retain the
+          // fail-closed identity and offer the existing explicit retry.
+          pushUi({ phase: 'error', error: 'Das Whiteboard-Panel hat nach dem Reload keine nutzbare Größe. Bitte Panel erneut öffnen oder „Erneut versuchen“ wählen.' });
+          console.error('[dsh-whiteboard] board mount timed out waiting for a visible container', { sessionId: sessionId, attempts: tries });
+        }
         return;
       }
+      if (requestedSessionId !== sessionId) return;
       if (boardRoot || editorHolder.editor) return;
       boardKey = persistenceKey;
+      boardSessionId = sessionId;
       loadModules().then(function (mods) {
         boardRoot = mods.reactDomClient.createRoot(boardHost);
         boardRoot.render(mods.react.createElement(mods.tldraw.Tldraw, {
@@ -264,7 +407,11 @@ window.__ModuleLoader__.load({
               // User edits are the only reason for a new snapshot. This
               // replaces the former fixed-interval snapshot poll.
               if (editor.store && typeof editor.store.listen === 'function') {
-                editor.store.listen(function () { if (commandConsumer) commandConsumer([], false); });
+                // Persist every tldraw mutation, including shapes that are not
+                // part of the compact Companion projection (for example a
+                // plain text shape or a geo heart). The full snapshot remains
+                // the durable source; the compact summary is still unchanged.
+                editor.store.listen(function () { if (commandConsumer) commandConsumer([], true); });
               }
             });
             navigateHash(editor);
@@ -492,11 +639,12 @@ window.__ModuleLoader__.load({
       }
       if (!shape && ref && ref.text != null) {
         var needle = String(ref.text).trim().toLowerCase();
-        var shapes = editor.getCurrentPageShapes ? editor.getCurrentPageShapes() : [];
-        for (var i = 0; i < shapes.length; i++) {
-          var candidate = shapes[i];
-          if (candidate.type !== 'note' && candidate.type !== 'frame') continue;
-          var candidateText = candidate.type === 'note' ? propsToText(candidate.props) : ((candidate.props && candidate.props.name) || '');
+          var shapes = editor.getCurrentPageShapes ? editor.getCurrentPageShapes() : [];
+          for (var i = 0; i < shapes.length; i++) {
+            var candidate = shapes[i];
+          var candidateText = propsToText(candidate.props);
+          if (!candidateText && candidate.type === 'frame') candidateText = (candidate.props && candidate.props.name) || '';
+          if (!candidateText && candidate.type === 'geo') candidateText = (candidate.props && candidate.props.geo) || '';
           if (String(candidateText).trim().toLowerCase() === needle) {
             if (shape) throw new Error('mehrdeutige bestehende Render-Referenz: ' + ref.text);
             shape = candidate;
@@ -564,10 +712,12 @@ window.__ModuleLoader__.load({
           var s = null;
           try { s = editor.getShape(id); } catch (err) {}
           if (!s) { out.push({ id: id, kind: 'unknown', text: '' }); continue; }
-          out.push({
-            id: s.id, kind: s.type,
-            text: s.type === 'note' ? truncate(propsToText(s.props), 60) : (s.type === 'frame' ? truncate((s.props && s.props.name) || '', 60) : '')
-          });
+          var selectionText = s.type === 'frame'
+            ? ((s.props && s.props.name) || '')
+            : propsToText(s.props);
+          if (!selectionText && s.type === 'geo' && s.props && s.props.geo) selectionText = String(s.props.geo);
+          if (!selectionText && s.type === 'image' && s.props && s.props.altText) selectionText = String(s.props.altText);
+          out.push({ id: s.id, kind: s.type, text: truncate(selectionText, 60) });
         }
         return out;
       } catch (err2) { return []; }
@@ -747,6 +897,11 @@ window.__ModuleLoader__.load({
       return renderStyledNote(mods, styleSpec, title, x, y, key, { href: href, pageRef: href }, href);
     }
 
+    function semanticLinkRenderKey(link, index) {
+      // Parallel links remain distinct; repeating the same plan keeps the key stable.
+      return 'renderer:link:' + String(link && link.from || '') + '>' + String(link && link.to || '') + ':' + String(link && link.label || '') + ':' + String(index);
+    }
+
     function shapeCopy(mods, source, styleSpec, x, y, key) {
       var text = propsToText(source.props);
       return renderStyledNote(mods, styleSpec, text, x, y, key, {
@@ -817,31 +972,49 @@ window.__ModuleLoader__.load({
         await activatePage(editor, targetPage.id);
       }
       if (!targetPage) throw new Error('Ziel-Page nicht auflösbar');
-      var all = editor.getCurrentPageShapes ? editor.getCurrentPageShapes() : [];
+      // Use the complete document for renderer-owned cleanup. A workspace
+      // board can be opened by multiple sessions and pages; limiting cleanup
+      // to the active page leaves old generated copies behind.
+      var all = allDocumentShapes(editor);
+      var samePage = normalizePageId(sourcePage.id) === normalizePageId(targetPage.id);
       var detach = Array.isArray(plan.detach) ? plan.detach : [];
       var detachIds = [];
+      function addDetachId(id) {
+        if (!id || detachIds.indexOf(id) >= 0) return;
+        detachIds.push(id);
+      }
       for (var di = 0; di < detach.length; di++) {
         var match = String(detach[di].match || '').toLowerCase();
         var presentationRole = String(detach[di].presentationRole || '');
-        var remove = [];
         for (var si = 0; si < all.length; si++) {
           var sm = all[si].meta || {};
-          if (sm.actor === 'agent' && sm.presentationRole === presentationRole && String(sm.sourceText || '').toLowerCase() === match) remove.push(all[si].id);
+          if (sm.actor === 'agent' && sm.presentationRole === presentationRole && String(sm.sourceText || '').toLowerCase() === match) addDetachId(all[si].id);
         }
-        if (remove.length) detachIds = detachIds.concat(remove);
       }
       var created = [];
       var byKey = {};
-      var samePage = normalizePageId(sourcePage.id) === normalizePageId(targetPage.id);
+      // Only agent-owned shapes with a deterministic renderKey are replaced.
+      // Human shapes are never removed based on their type, text, or position.
+      var renderKeys = { 'renderer:workspace-heading': true, 'renderer:back-reference': true };
+      for (var rk = 0; rk < elements.length; rk++) renderKeys['renderer:' + String(elements[rk].key)] = true;
+      if (plan.overview && plan.overview.action === 'ensure_navigation_reference' && !samePage) renderKeys['renderer:overview-reference'] = true;
+      var plannedLinks = Array.isArray(plan.links) ? plan.links : [];
+      for (var lrk = 0; lrk < plannedLinks.length; lrk++) renderKeys[semanticLinkRenderKey(plannedLinks[lrk], lrk)] = true;
+      for (var oldIndex = 0; oldIndex < all.length; oldIndex++) {
+        var oldMeta = all[oldIndex].meta || {};
+        if (oldMeta.actor === 'agent' && renderKeys[oldMeta.renderKey]) addDetachId(all[oldIndex].id);
+        // Link arrows created before renderKey was introduced are still
+        // unambiguously renderer-owned by this generic actor/presentation
+        // marker. Remove only that legacy subset during migration.
+        if (all[oldIndex].type === 'arrow' && oldMeta.actor === 'agent' && oldMeta.actorLabel === 'DSH Whiteboard' && oldMeta.presentationRole === 'navigation') addDetachId(all[oldIndex].id);
+      }
       // A render issued while the target page is already active has no
       // meaningful "back to overview" destination. Remove an older
       // renderer-owned self-reference and do not create another one.
       if (samePage) {
         for (var ri = 0; ri < all.length; ri++) {
-          var oldMeta = all[ri].meta || {};
-          if (oldMeta.actor === 'agent' && oldMeta.renderKey === 'renderer:back-reference' && oldMeta.pageRef === pageHash(targetPage.id)) {
-            detachIds.push(all[ri].id);
-          }
+          var samePageMeta = all[ri].meta || {};
+          if (samePageMeta.actor === 'agent' && samePageMeta.renderKey === 'renderer:back-reference') addDetachId(all[ri].id);
         }
       }
       var headingStyle = presentationStyle(plan.presentation && plan.presentation.heading, 'presentation.heading');
@@ -873,14 +1046,30 @@ window.__ModuleLoader__.load({
         }
       });
       var targetRef = pageHash(targetPage.id);
-      if (plan.overview && plan.overview.action === 'ensure_navigation_reference') {
+      if (plan.overview && plan.overview.action === 'ensure_navigation_reference' && !samePage) {
         await activatePage(editor, sourcePage.id);
         var refX = sourceBounds ? sourceBounds.x + sourceBounds.w + 30 : 80;
         var refY = sourceBounds ? sourceBounds.y : 80;
+        var sourcePageShapes = editor.getCurrentPageShapes ? editor.getCurrentPageShapes() : [];
+        var sourceDetachIds = [];
+        for (var osi = 0; osi < sourcePageShapes.length; osi++) {
+          var sourceMeta = sourcePageShapes[osi].meta || {};
+          if (sourceMeta.actor === 'agent' && sourceMeta.renderKey === 'renderer:overview-reference') sourceDetachIds.push(sourcePageShapes[osi].id);
+        }
+        if (sourceDetachIds.length) editor.run(function () { editor.deleteShapes(sourceDetachIds); });
         editor.run(function () { var overviewShape = pageReference(mods, navigationStyle, plan.overview.label || 'Denkraum öffnen: ' + plan.page.title, targetRef, refX, refY, 'overview-reference'); overviewShape.parentId = sourcePage.id; editor.createShapes([overviewShape]); });
         await activatePage(editor, targetPage.id);
       }
       await waitForCurrentPage(editor, targetPage.id);
+      if (!samePage) {
+        var targetPageShapes = editor.getCurrentPageShapes ? editor.getCurrentPageShapes() : [];
+        var backDetachIds = [];
+        for (var bsi = 0; bsi < targetPageShapes.length; bsi++) {
+          var backMeta = targetPageShapes[bsi].meta || {};
+          if (backMeta.actor === 'agent' && backMeta.renderKey === 'renderer:back-reference') backDetachIds.push(targetPageShapes[bsi].id);
+        }
+        if (backDetachIds.length) editor.run(function () { editor.deleteShapes(backDetachIds); });
+      }
       if (!samePage) editor.run(function () { var backShape = pageReference(mods, navigationStyle, '↩ Zur Übersicht', pageHash(sourcePage.id), 70, 650, 'back-reference'); backShape.parentId = targetPage.id; editor.createShapes([backShape]);
       var links = Array.isArray(plan.links) ? plan.links : [];
       for (var li = 0; li < links.length; li++) {
@@ -888,9 +1077,10 @@ window.__ModuleLoader__.load({
         if (!from || !to) throw new Error('Link-Referenz nicht im RenderPlan: ' + links[li].from + ' -> ' + links[li].to);
         var fb = editor.getShapePageBounds(from.id), tb = editor.getShapePageBounds(to.id);
         var arrowId = uniqueShapeId(mods);
+        var linkRenderKey = semanticLinkRenderKey(links[li], li);
         editor.createShapes([{ id: arrowId, type: 'arrow', parentId: targetPage.id, x: fb.x + fb.w / 2, y: fb.y + fb.h / 2,
           props: { color: 'light-violet', start: { x: 0, y: 0 }, end: { x: tb.x + tb.w / 2 - (fb.x + fb.w / 2), y: tb.y + tb.h / 2 - (fb.y + fb.h / 2) }, text: links[li].label || '' },
-          meta: { actor: 'agent', actorLabel: 'DSH Whiteboard', presentationRole: navigationStyle.role } }]);
+          meta: { actor: 'agent', actorLabel: 'DSH Whiteboard', presentationRole: navigationStyle.role, renderKey: linkRenderKey } }]);
         createArrowBindings(editor, arrowId, from.id, to.id);
       }
       });
@@ -1129,13 +1319,33 @@ window.__ModuleLoader__.load({
       var notes = [];
       var frames = [];
       var arrows = [];
+      var elements = [];
       var i, s, meta, b;
       for (i = 0; i < shapes.length; i++) {
         s = shapes[i];
-        if (s.type !== 'note') continue;
         meta = s.meta || {};
+        try { b = editor.getShapePageBounds(s.id); } catch (boundsError) { b = null; }
+        var shapeText = propsToText(s.props);
+        if (!shapeText && s.type === 'frame') shapeText = s.props && s.props.name || '';
+        if (!shapeText && s.type === 'geo') shapeText = s.props && s.props.geo || '';
+        if (!shapeText && s.type === 'image') shapeText = s.props && s.props.altText || '';
+        shapeText = truncate(shapeText, 200);
+        elements.push({
+          id: s.id, type: s.type,
+          geo: s.type === 'geo' && s.props && s.props.geo ? String(s.props.geo) : null,
+          text: shapeText,
+          x: Math.round(Number(s.x) || 0), y: Math.round(Number(s.y) || 0),
+          position: { x: Math.round(Number(s.x) || 0), y: Math.round(Number(s.y) || 0) },
+          bounds: b ? { x: Math.round(b.x), y: Math.round(b.y), w: Math.round(b.w), h: Math.round(b.h) } : null,
+          rotation: Number(s.rotation) || 0,
+          parentId: String(s.parentId || ''),
+          actor: meta.actor === 'agent' ? 'agent' : 'human',
+          proposal: meta.proposal === true,
+          movedBy: meta.movedBy || null
+        });
+        if (s.type !== 'note') continue;
         notes.push({
-          id: s.id, text: truncate(propsToText(s.props), 200),
+          id: s.id, text: shapeText,
           x: Math.round(s.x), y: Math.round(s.y),
           parentId: String(s.parentId || ''),
           actor: meta.actor === 'agent' ? 'agent' : 'human',
@@ -1180,6 +1390,7 @@ window.__ModuleLoader__.load({
         proposals.push({ frameId: frames[i].id, title: frames[i].clusterTitle || frames[i].name, memberCount: frames[i].memberIds.length, memberIds: frames[i].memberIds });
       }
       return {
+        elements: elements.slice(0, 600),
         notes: notes.slice(0, 400),
         frames: frames.slice(0, 200),
         arrows: arrows.slice(0, 400),
@@ -1223,6 +1434,10 @@ window.__ModuleLoader__.load({
 
     function boardSignature(snap) {
       var parts = [];
+      var es = snap.elements || [];
+      for (var e = 0; e < es.length; e++) {
+        parts.push(es[e].id + ':' + es[e].type + ':' + (es[e].geo || '') + ':' + es[e].x + ':' + es[e].y + ':' + (es[e].bounds ? es[e].bounds.w + 'x' + es[e].bounds.h : '') + ':' + es[e].rotation + ':' + (es[e].parentId || '') + ':' + es[e].actor + ':' + es[e].text);
+      }
       var ns = snap.notes || [];
       for (var i = 0; i < ns.length; i++) {
         parts.push(ns[i].id + ':' + ns[i].x + ':' + ns[i].y + ':' + ns[i].actor + ':' + (ns[i].parentId || '') + ':' + ns[i].text);
@@ -1327,7 +1542,7 @@ window.__ModuleLoader__.load({
       var tabInfo = props && typeof props.useTabInfo === 'function' ? props.useTabInfo() : null;
       var sidebarExpanded = tabInfo && tabInfo.sidebar ? tabInfo.sidebar.expanded : null;
       var tabVisible = tabInfo && tabInfo.tab ? tabInfo.tab.visible : null;
-      var key = 'dsh-whiteboard-' + (sessionId || 'shared');
+      var key = 'dsh-whiteboard-session-' + (sessionId || 'shared');
       var wasBoardOpen = React.useRef(false);
       if (!migrateFromKey) migrateFromKey = key;
 
@@ -1340,10 +1555,19 @@ window.__ModuleLoader__.load({
       React.useEffect(function () {
         if (!sessionId || typeof EventSource !== 'function') return;
         var source = new EventSource(COMMAND_EVENTS_URL + '?sessionId=' + encodeURIComponent(sessionId));
+        // The DSH host keeps compact live snapshots only in memory. After a
+        // host restart an already-mounted editor reconnects its EventSource,
+        // but has no local mutation that would otherwise trigger a snapshot.
+        // Force exactly one bootstrap sync per EventSource connection.
+        source.addEventListener('open', function () {
+          if (commandConsumer) commandConsumer([], true);
+        });
         source.addEventListener('whiteboard-commands', function (event) {
           var message;
           try { message = JSON.parse(event.data || '{}'); } catch (error) { return; }
-          if (commandConsumer) commandConsumer(Array.isArray(message.commands) ? message.commands : [], true);
+          var commands = Array.isArray(message.commands) ? message.commands : [];
+          if (commandConsumer) commandConsumer(commands, true);
+          else if (commands.length) deferredCommandEvents = deferredCommandEvents.concat(commands);
         });
         return function () { source.close(); };
       }, [sessionId]);
@@ -1364,39 +1588,57 @@ window.__ModuleLoader__.load({
         }
       }, [sidebarExpanded, tabVisible]);
 
+      function startBoard() {
+        if (!sessionId) {
+          pushUi({ phase: 'error', error: 'Whiteboard-Session fehlt' });
+          return;
+        }
+        resolveBoardIdentity(sessionId).then(function (identity) {
+          if (boardSessionId !== null && boardSessionId !== sessionId) resetMountedBoard();
+          if (boardKey !== null && boardKey !== identity.persistenceKey) resetMountedBoard();
+          if (!boardRoot && !editorHolder.editor) {
+            initBoardWhenVisible(function () { return containerRef.current; }, identity.persistenceKey, sessionId, 0);
+          }
+        }).catch(function (error) {
+          pushUi({ phase: 'error', error: String((error && error.message) || error) });
+          console.error('[dsh-whiteboard] board identity resolution failed', error);
+        });
+      }
+
       React.useEffect(function () {
         if (!boardHost) return;
         var el = containerRef.current;
         if (!el) return;
         // The canvas host is intentionally global so a tldraw editor is not
         // React-unmounted while a sidebar seat is merely moved. A session
-        // change is different: retaining the old editor would expose the
-        // previous session's board under the new persistence key. Dispose the
-        // old editor before moving the host and start the new keyed instance.
-        if (boardKey !== null && boardKey !== key) {
-          try { if (boardRoot) boardRoot.unmount(); } catch (err0) {}
-          boardRoot = null;
-          editorHolder.editor = null;
-          boardKey = null;
-          serverBoardId = null;
-          serverVersion = 0;
-          serverReady = false;
-          serverPersistenceEnabled = false;
-          serverRetryRequested = false;
-          hostSessionKey = null;
-          migrateFromKey = key;
-          migrationLastKey = null;
-          migrationRunning = false;
-          uiState = { counts: { notes: 0, human: 0, agent: 0, proposals: 0 }, notes: [], proposals: [], selection: [], activity: [], phase: 'loading', error: '' };
-          pushUi();
-        }
+        // change still gets a fresh editor, but its persistence key is the
+        // workspace board identity shared by all sessions in that workspace.
         if (boardHost.parentNode !== el) {
           if (boardHost.parentNode) boardHost.parentNode.removeChild(boardHost);
           el.appendChild(boardHost);
         }
-        if (!boardRoot && !editorHolder.editor) {
-          initBoardWhenVisible(function () { return containerRef.current; }, key, 0);
+        var cancelled = false;
+        requestedSessionId = sessionId || null;
+        if (!sessionId) {
+          if (boardSessionId !== null) resetMountedBoard();
+        } else {
+          resolveBoardIdentity(sessionId).then(function (identity) {
+            if (cancelled) return;
+            if (boardSessionId !== null && boardSessionId !== sessionId) resetMountedBoard();
+            if (boardKey !== null && boardKey !== identity.persistenceKey) resetMountedBoard();
+            if (!boardRoot && !editorHolder.editor) {
+              initBoardWhenVisible(function () { return containerRef.current; }, identity.persistenceKey, sessionId, 0);
+            }
+          }).catch(function (error) {
+            if (cancelled) return;
+            pushUi({ phase: 'error', error: String((error && error.message) || error) });
+            console.error('[dsh-whiteboard] board identity resolution failed', error);
+          });
         }
+        return function () {
+          cancelled = true;
+          if (requestedSessionId === sessionId) requestedSessionId = null;
+        };
       }, [key]);
 
       function adoptProposal(frameId) {
@@ -1575,7 +1817,7 @@ window.__ModuleLoader__.load({
           ui.phase === 'loading' ? React.createElement('div', { className: 'wb-loading' }, 'Lade tldraw …') : null,
           ui.phase === 'error' ? React.createElement('div', { className: 'wb-error' },
             React.createElement('div', null, 'tldraw konnte nicht geladen werden: ' + ui.error),
-            React.createElement('button', { className: 'wb-btn', onClick: function () { pushUi({ phase: 'loading', error: '' }); initBoardWhenVisible(function () { return containerRef.current; }, key, 0); } }, 'Erneut versuchen')
+            React.createElement('button', { className: 'wb-btn', onClick: function () { pushUi({ phase: 'loading', error: '' }); startBoard(); } }, 'Erneut versuchen')
           ) : null,
           panelVisible ? panel : null
         )
@@ -1588,7 +1830,15 @@ window.__ModuleLoader__.load({
       var hookSessionId = props && typeof props.useSession === 'function'
         ? props.useSession(function (snapshot) { return snapshot && snapshot.sessionId ? String(snapshot.sessionId) : null; })
         : null;
-      var sessionId = props && props.sessionId ? String(props.sessionId) : hookSessionId;
+      // `shell.overlay` is root-scoped. It therefore receives the root
+      // `useSessions` hook, not the session-scoped `useSession` hook that the
+      // sidebar tab body receives. Without this projection the opener never
+      // subscribes to the session-bound open-event stream, so a host request
+      // cannot open the board for the active Companion session.
+      var rootSessionId = props && typeof props.useSessions === 'function'
+        ? props.useSessions(function (state) { return state && state.current ? String(state.current) : null; })
+        : null;
+      var sessionId = props && props.sessionId ? String(props.sessionId) : (hookSessionId || rootSessionId);
 
       React.useEffect(function () {
         var opening = false;
@@ -1615,13 +1865,23 @@ window.__ModuleLoader__.load({
         source.addEventListener('whiteboard-open', function (event) {
           var result;
           try { result = JSON.parse(event.data || '{}'); } catch (error) { return; }
-          if (result && result.open && openBoard(result.sessionId)) {
+          if (!result || !result.open) return;
+          var requestedSessionId = result.sessionId || sessionId || null;
+          function retryOpen(attempts) {
+            if (openBoard(requestedSessionId)) {
               // The host keeps the request until the sidebar controller has
               // accepted the open. This closes the retry window only after a
               // real openTab call, not after a transient missing session
               // surface error.
-              apiCall('wb-open-ack', { sessionId: result.sessionId || sessionId || null }).catch(function () {});
+              apiCall('wb-open-ack', { sessionId: requestedSessionId }).catch(function () {});
+              return;
+            }
+            // The shell overlay can render before the active session surface
+            // exists. Keep trying for the same bounded window as the host
+            // request instead of losing the one-shot event.
+            if ((attempts || 0) < 80) clientCtx.timeout(function () { retryOpen((attempts || 0) + 1); }, 100);
           }
+          retryOpen(0);
         });
         return function () { source.close(); };
       }, [sessionId]);
@@ -1637,7 +1897,10 @@ window.__ModuleLoader__.load({
       '.wb-header .wb-title{font-weight:600;}' +
       '.wb-header .wb-spacer{flex:1;}' +
       '.wb-counts{opacity:.72;white-space:nowrap;}' +
-      '.wb-body{position:relative;flex:1 1 auto;min-height:0;}' +
+      // Firefox can initially resolve the sidebar tab content to zero height
+      // during a page reload. Reserve a real canvas seat before the editor is
+      // mounted; it may grow normally with the sidebar afterwards.
+      '.wb-body{position:relative;flex:1 1 auto;min-height:240px;}' +
       '.wb-mount{position:absolute;inset:0;}' +
       '.wb-host{position:absolute;inset:0;}' +
       '.wb-loading{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:14px;opacity:.7;pointer-events:none;z-index:5;}' +
@@ -1789,14 +2052,21 @@ window.__ModuleLoader__.load({
             var results = [];
             var mods = loadedModules;
             for (var i = 0; i < commands.length; i++) {
+              var commandId = commands[i] && commands[i].commandId ? String(commands[i].commandId) : '';
+              var completedKey = commandId ? String(activeSessionId() || '') + '\u0000' + commandId : '';
+              if (completedKey && completedCommandIds[completedKey]) {
+                results.push({ commandId: commandId, op: commands[i].op, ok: true, replayed: true });
+                continue;
+              }
               try {
                 await execCommand(mods, editor, commands[i]);
-                results.push({ op: commands[i].op, ok: true });
+                if (completedKey) completedCommandIds[completedKey] = true;
+                results.push({ commandId: commandId || undefined, op: commands[i].op, ok: true });
                 pushActivity('🤖 Agent: ' + describeCommand(commands[i]));
               } catch (err) {
                 var commandError = String(err && err.message || err);
                 try { console.error('[dsh-whiteboard] command failed', commands[i] && commands[i].op, commandError, err); } catch (diagErr) {}
-                results.push({ op: commands[i] && commands[i].op, ok: false, error: commandError });
+                results.push({ commandId: commandId || undefined, op: commands[i] && commands[i].op, ok: false, error: commandError });
                 pushActivity('⚠️ Agent-Aktion fehlgeschlagen (' + (commands[i] && commands[i].op) + ')');
               }
             }
@@ -1845,6 +2115,9 @@ window.__ModuleLoader__.load({
       commandConsumer = function (commands, force) {
         if (Array.isArray(commands) && commands.length) pendingCommands = pendingCommands.concat(commands);
         if (force) forceSync = true;
+        // Keep commands until the editor has hydrated and the host snapshot
+        // channel is ready. The hydrate completion below schedules the drain.
+        if (!editorHolder.editor || !serverReady) return;
         if (syncScheduled || busy) return;
         syncScheduled = true;
         clientCtx.timeout(function () {
@@ -1855,6 +2128,10 @@ window.__ModuleLoader__.load({
           syncBoard(queued, forced);
         }, pendingCommands.length ? 0 : 250);
       };
+      if (deferredCommandEvents.length) {
+        var deferred = deferredCommandEvents.splice(0, deferredCommandEvents.length);
+        commandConsumer(deferred, true);
+      }
     }
 
     return {

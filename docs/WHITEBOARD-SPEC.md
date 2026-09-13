@@ -16,17 +16,27 @@ Host: dsh-whiteboard
   ├─ whiteboard_state             (intern)
   ├─ whiteboard_request_open      (intern)
   ├─ whiteboard_render_plan        (intern)
-  └─ versionierter Snapshot-Store (workspacegebundene Board-ID)
+  └─ versionierter Snapshot-Store im Workspace (`.dsh-whiteboard/snapshot.json`)
         ▲ HTTP-API
         │
 Browser: shell.overlay opener + rechte Sidebar
-  └─ eine tldraw-Instanz, persistenceKey dsh-whiteboard-<sessionId>
+  └─ eine tldraw-Instanz, persistenceKey dsh-whiteboard-board-<boardId>
 ```
 
-Die browserlokale IndexedDB ist ein Cache. Der Host-Store ist die gemeinsame
+Die browserlokale IndexedDB ist ein Cache. Der Host-Store liegt direkt im
+Workspace unter `.dsh-whiteboard/snapshot.json` und ist die gemeinsame
 Persistenzquelle für Neustart und Browserwechsel; das ist kein Echtzeit-
 Mehrbrowser-Sync. Version/ETag-Konflikte werden geschützt, nicht automatisch
-zusammengeführt.
+zusammengeführt. Der `boardId` wird ausschließlich aus dem aufgelösten
+Workspace abgeleitet. Mehrere Sessions desselben Workspace verwenden deshalb
+dieselbe lokale Board-Datei; die Session-ID bleibt nur die Identität des Live-
+Eventkanals und des konkreten Agentenauftrags. Alte zentrale Snapshots unter
+`$DSH_HOME/whiteboard-snapshots` werden beim ersten Zugriff kopiert und nicht
+gelöscht.
+
+Eine fehlende oder unbekannte Session darf nicht auf `process.cwd()` oder einen
+anderen geratenen Workspace zurückfallen. Board-Auflösung und dauerhafte
+Speicherung bleiben in diesem Fall fail-closed.
 
 ## Öffnen und Reload
 
@@ -36,12 +46,17 @@ Der Opener muss auch bei geschlossener Sidebar im `shell.overlay` leben.
 2. Bei `live=false` ruft der Host intern `whiteboard_request_open` mit der
    Session-ID auf.
 3. Der Browser-Opener nimmt nur das passende sessiongebundene Signal an und
-   ruft `sidebarRight.openTab('whiteboard')` auf.
+   ruft `sidebarRight.openTab('whiteboard')` auf. Der Opener lebt in der
+   root-scoped `shell.overlay`-Fläche und liest die aktive Session deshalb über
+   `useSessions(state.current)`; der Sidebar-Body selbst erhält weiterhin
+   `sessionId`/`useSession` direkt.
 4. Der Renderer wartet begrenzt auf den ersten Live-Snapshot und reiht erst
    danach den RenderPlan ein.
 5. Ein explizit geöffnetes Board speichert seine Ansicht pro Browser-Origin.
    Beim Reload wird das Öffnen wiederholt, falls der Session-Surface beim
-   ersten Render noch nicht gemountet ist.
+   ersten Render noch nicht gemountet ist. Die workspacegebundene Board-ID
+   wird während der Session-Rehydration begrenzt erneut aufgelöst; ein
+   endgültiger Identitätsfehler bleibt fail-closed.
 
 Ein fehlender oder nicht erreichbarer Browser bleibt nach dem Timeout ein
 ehrlicher `blocked`-Zustand; der Agent darf keinen Erfolg behaupten.
@@ -84,11 +99,36 @@ kontextlosen oder geschlossenen DSH-Panel führen.
   Befehl darf den Poll-Loop nicht beenden.
 - Bei tldraw-Schemafehlern: Fehler protokollieren, Board nicht zurücksetzen,
   Seite neu laden und Snapshot-Persistenz erhalten.
-- `live=false` bedeutet „kein aktueller Browser-Client lauscht“, nicht „Board
-  ist leer“.
-- Kurzzeitige Netzwerkabbrüche beim DSH-API-Request werden einmal begrenzt
-  wiederholt. Der kompakte Live-Snapshot und der dauerhafte Vollsnapshot sind
-  getrennt; ein Ausfall des einen beendet den anderen Sync nicht.
+- `connected=true` bedeutet nur, dass der sessiongebundene EventStream steht.
+  `live=true` wird erst nach einem aktuellen kompakten Snapshot gesetzt; ein
+  verbundenes Board ohne Snapshot bleibt für den Companion nicht lesbar.
+- Nach einem Host-Neustart sendet ein erneut verbundener Browser genau einen
+  Bootstrap-Snapshot, auch wenn auf dem Canvas noch keine neue Mutation
+  stattgefunden hat.
+- Kurzzeitige Netzwerkabbrüche und die kurze Reihenfolgeverschiebung zwischen
+  DSH-Route und Session-Registry werden bei der aktiven Board-Auflösung
+  begrenzt wiederholt. Der kompakte Live-Snapshot und der dauerhafte
+  Vollsnapshot sind getrennt; ein Ausfall des einen beendet den anderen Sync
+  nicht.
+- Bei der Hydration werden ausschließlich agenteneigene `renderer:*`-Shapes mit
+  demselben Render-Key dedupliziert; menschliche Shapes bleiben unverändert.
+
+### Render-Command-Handshake
+
+Ein Renderauftrag erhält eine sessiongebundene `commandId`. `accepted: true`
+heißt nur: Der Host hat den Auftrag angenommen bzw. an den passenden
+Browser-Eventkanal übergeben. Das ist kein sichtbarer Erfolg. Der Client sendet
+nach der Ausführung im nächsten `wb-snapshot` ein `commandResults`-Element mit
+derselben ID und `ok: true` oder `ok: false`. Erst die positive Kombination aus
+ID, Ergebnis und Folge-Snapshot gilt als bestätigt (`verified`).
+
+Der Client puffert Events, die während des asynchronen tldraw-Ladens eintreffen,
+und ignoriert eine bereits erfolgreich ausgeführte ID bei einer Nachlieferung.
+Bei fehlendem oder negativem Ack darf der semantische Aufrufer den gleichen
+Auftrag mit derselben ID höchstens einmal wiederholen. Danach bleibt der
+Auftrag ehrlich `pending` bzw. `failed`; `queued` darf nicht als Erfolg
+ausgegeben werden. Die Bestätigungen sind flüchtig und werden nicht in den
+dauerhaften tldraw-Snapshot persistiert.
 
 ## Nicht-Ziele
 

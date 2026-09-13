@@ -47,6 +47,34 @@ async function writeJsonAtomically(filePath, value) {
   }
 }
 
+async function readSnapshotRecord(filePath, boardId) {
+  try {
+    const raw = await fs.readFile(filePath, 'utf8');
+    const record = JSON.parse(raw);
+    if (record?.schemaVersion !== SNAPSHOT_SCHEMA_VERSION || record?.boardId !== boardId || !validSnapshot(record.snapshot)) {
+      throw new Error('ungültiges Whiteboard-Snapshot-Format');
+    }
+    return {
+      schemaVersion: SNAPSHOT_SCHEMA_VERSION,
+      boardId,
+      version: Number.isInteger(record.version) && record.version >= 1 ? record.version : 1,
+      savedAt: typeof record.savedAt === 'string' ? record.savedAt : null,
+      snapshot: record.snapshot
+    };
+  } catch (error) {
+    if (error?.code === 'ENOENT') return null;
+    throw error;
+  }
+}
+
+export function workspaceSnapshotPath(workspace) {
+  const workspaceRoot = path.resolve(String(workspace || ''));
+  if (!workspace || workspaceRoot === path.parse(workspaceRoot).root) {
+    throw new Error('gültiger Workspace für das Whiteboard erforderlich');
+  }
+  return path.join(workspaceRoot, '.dsh-whiteboard', 'snapshot.json');
+}
+
 export function createSnapshotStore({ root }) {
   const storageRoot = path.resolve(String(root || path.join(process.cwd(), 'whiteboard-snapshots')));
   let ready;
@@ -64,22 +92,7 @@ export function createSnapshotStore({ root }) {
 
   async function load(boardId) {
     await ensureRoot();
-    try {
-      const raw = await fs.readFile(filePath(boardId), 'utf8');
-      const record = JSON.parse(raw);
-      if (record?.schemaVersion !== SNAPSHOT_SCHEMA_VERSION || record?.boardId !== boardId || !validSnapshot(record.snapshot)) {
-        throw new Error('ungültiges Whiteboard-Snapshot-Format');
-      }
-      return {
-        boardId,
-        version: Number.isInteger(record.version) && record.version >= 1 ? record.version : 1,
-        savedAt: typeof record.savedAt === 'string' ? record.savedAt : null,
-        snapshot: record.snapshot
-      };
-    } catch (error) {
-      if (error?.code === 'ENOENT') return null;
-      throw error;
-    }
+    return readSnapshotRecord(filePath(boardId), boardId);
   }
 
   async function save(boardId, expectedVersion, snapshot) {
@@ -114,4 +127,72 @@ export function createSnapshotStore({ root }) {
   }
 
   return { root: storageRoot, load, save };
+}
+
+/**
+ * Workspace-local durable snapshots. The browser receives only a board ID;
+ * the trusted DSH session context supplies the workspace path to this store.
+ * A legacy central snapshot is copied once on first read and deliberately kept
+ * as a recoverable migration source.
+ */
+export function createWorkspaceSnapshotStore({ legacyRoot } = {}) {
+  const legacyStorageRoot = path.resolve(String(legacyRoot || path.join(process.cwd(), 'whiteboard-snapshots')));
+  const writeChains = new Map();
+
+  function location(board) {
+    if (!board || !validBoardId(board.boardId)) throw new Error('ungültige Whiteboard-ID');
+    const workspace = path.resolve(String(board.workspace || ''));
+    return {
+      boardId: board.boardId,
+      workspace,
+      filePath: workspaceSnapshotPath(workspace),
+      legacyFilePath: path.join(legacyStorageRoot, `${board.boardId}.json`)
+    };
+  }
+
+  async function load(board) {
+    const target = location(board);
+    const local = await readSnapshotRecord(target.filePath, target.boardId);
+    if (local) return local;
+
+    const legacy = await readSnapshotRecord(target.legacyFilePath, target.boardId);
+    if (!legacy) return null;
+    await fs.mkdir(path.dirname(target.filePath), { recursive: true });
+    await writeJsonAtomically(target.filePath, legacy);
+    return legacy;
+  }
+
+  async function save(board, expectedVersion, snapshot) {
+    if (!validSnapshot(snapshot)) throw new Error('ungültiger tldraw-Snapshot');
+    const target = location(board);
+    const prior = writeChains.get(target.filePath) || Promise.resolve();
+    const operation = prior.then(async () => {
+      const current = await load(board);
+      const actualVersion = current?.version || 0;
+      if (expectedVersion !== actualVersion) {
+        return {
+          ok: false,
+          conflict: true,
+          boardId: target.boardId,
+          version: actualVersion,
+          savedAt: current?.savedAt || null,
+          snapshot: current?.snapshot || null
+        };
+      }
+      const next = {
+        schemaVersion: SNAPSHOT_SCHEMA_VERSION,
+        boardId: target.boardId,
+        version: actualVersion + 1,
+        savedAt: new Date().toISOString(),
+        snapshot
+      };
+      await fs.mkdir(path.dirname(target.filePath), { recursive: true });
+      await writeJsonAtomically(target.filePath, next);
+      return { ok: true, boardId: target.boardId, version: next.version, savedAt: next.savedAt };
+    });
+    writeChains.set(target.filePath, operation.catch(() => {}));
+    return operation;
+  }
+
+  return { legacyRoot: legacyStorageRoot, load, save, workspaceSnapshotPath };
 }
