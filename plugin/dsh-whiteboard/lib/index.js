@@ -16,7 +16,65 @@ export function apply(ctx) {
   const dshHome = process.env.DSH_HOME || process.cwd();
   const snapshotStore = createSnapshotStore({ root: path.join(dshHome, 'whiteboard-snapshots') });
 
-  const state = { queue: [], snapshot: null, snapshots: new Map(), openRequests: new Map(), lastCommandResults: [], lastSeenAt: 0, lastSeenBySession: new Map(), sessionId: null };
+  const state = { queue: [], snapshot: null, snapshots: new Map(), openRequests: new Map(), openSubscribers: new Map(), commandSubscribers: new Map(), lastCommandResults: [], lastSeenAt: 0, lastSeenBySession: new Map(), sessionId: null };
+
+  function pendingOpenResult(requestedSessionId) {
+    const now = Date.now();
+    for (const [sessionId, requestedAt] of state.openRequests) {
+      if (now - requestedAt > 15000) state.openRequests.delete(sessionId);
+    }
+    if (requestedSessionId && state.openRequests.has(requestedSessionId)) {
+      return { open: true, sessionId: requestedSessionId };
+    }
+    // Without a session identity, only open when exactly one session has
+    // pending work. This keeps cross-workspace opening fail-closed.
+    if (!requestedSessionId) {
+      const pendingSessions = [...new Set([
+        ...state.queue.map((command) => command.sessionId),
+        ...state.openRequests.keys()
+      ].filter(Boolean))];
+      if (pendingSessions.length === 1 && state.openRequests.has(pendingSessions[0])) {
+        return { open: true, sessionId: pendingSessions[0] };
+      }
+    }
+    return { open: false };
+  }
+
+  function emitOpenEvent(response, result) {
+    try { response.write('event: whiteboard-open\ndata: ' + JSON.stringify(result) + '\n\n'); } catch (error) {}
+  }
+
+  function notifyOpenSubscribers(sessionId) {
+    const subscribers = state.openSubscribers.get(sessionId);
+    if (!subscribers) return;
+    const result = pendingOpenResult(sessionId);
+    if (!result.open) return;
+    for (const response of [...subscribers]) emitOpenEvent(response, result);
+  }
+
+  function takeCommands(sessionId) {
+    const commands = sessionId ? state.queue.filter((command) => command.sessionId === sessionId) : state.queue;
+    state.queue = sessionId ? state.queue.filter((command) => command.sessionId !== sessionId) : [];
+    return commands;
+  }
+
+  function emitCommands(response, commands) {
+    try { response.write('event: whiteboard-commands\ndata: ' + JSON.stringify({ commands }) + '\n\n'); } catch (error) {}
+  }
+
+  function notifyCommandSubscribers(sessionId) {
+    const subscribers = state.commandSubscribers.get(sessionId);
+    if (!subscribers || !subscribers.size) return;
+    const commands = takeCommands(sessionId);
+    if (!commands.length) return;
+    for (const response of [...subscribers]) emitCommands(response, commands);
+  }
+
+  function requestOpen(sessionId) {
+    if (!sessionId) return;
+    state.openRequests.set(sessionId, Date.now());
+    notifyOpenSubscribers(sessionId);
+  }
 
   function workspaceForSession(sessionId) {
     try {
@@ -47,7 +105,8 @@ export function apply(ctx) {
       }
     }
     state.queue.push(cmd);
-    if (state.sessionId) state.openRequests.set(state.sessionId, Date.now());
+    requestOpen(state.sessionId);
+    notifyCommandSubscribers(state.sessionId);
     return { accepted: true, op, pending: state.queue.length };
   }
 
@@ -70,38 +129,17 @@ export function apply(ctx) {
           key: state.sessionId ? 'dsh-whiteboard-' + state.sessionId : null,
           sessionId: state.sessionId
         };
-      case 'wb-open-poll': {
-        const requestedSessionId = args && args.sessionId ? String(args.sessionId).replace(/^dsh-whiteboard-/, '') : null;
-        const now = Date.now();
-        for (const [sessionId, requestedAt] of state.openRequests) {
-          if (now - requestedAt > 15000) state.openRequests.delete(sessionId);
-        }
-        if (requestedSessionId && state.openRequests.has(requestedSessionId)) {
-          state.openRequests.delete(requestedSessionId);
-          return { open: true };
-        }
-        // With no session identity, fail closed when more than one session has
-        // pending work; a browser must never open another workspace's board.
-        if (!requestedSessionId) {
-          const pendingSessions = [...new Set([
-            ...state.queue.map((command) => command.sessionId),
-            ...state.openRequests.keys()
-          ].filter(Boolean))];
-          if (pendingSessions.length === 1 && state.openRequests.has(pendingSessions[0])) {
-            state.openRequests.delete(pendingSessions[0]);
-            return { open: true };
-          }
-        }
-        return { open: false };
+      case 'wb-open-ack': {
+        const acknowledgedSessionId = args && args.sessionId ? String(args.sessionId).replace(/^dsh-whiteboard-/, '') : null;
+        if (acknowledgedSessionId) state.openRequests.delete(acknowledgedSessionId);
+        return { acknowledged: !!acknowledgedSessionId };
       }
       case 'wb-poll':
         state.lastSeenAt = Date.now();
         {
           const requestedSessionId = args && args.sessionId ? String(args.sessionId).replace(/^dsh-whiteboard-/, '') : null;
           if (requestedSessionId) state.lastSeenBySession.set(requestedSessionId, Date.now());
-          const commands = requestedSessionId ? state.queue.filter((command) => command.sessionId === requestedSessionId) : state.queue;
-          state.queue = requestedSessionId ? state.queue.filter((command) => command.sessionId !== requestedSessionId) : [];
-          return { commands };
+          return { commands: takeCommands(requestedSessionId) };
         }
       case 'wb-snapshot':
         state.lastSeenAt = Date.now();
@@ -137,7 +175,10 @@ export function apply(ctx) {
   }
 
   function isLive(sessionId) {
-    const seenAt = sessionId && state.lastSeenBySession.has(sessionId) ? state.lastSeenBySession.get(sessionId) : state.lastSeenAt;
+    if (sessionId && state.commandSubscribers.get(sessionId)?.size) return true;
+    const seenAt = sessionId
+      ? (state.lastSeenBySession.get(sessionId) || 0)
+      : state.lastSeenAt;
     return seenAt > 0 && (Date.now() - seenAt) < 15000;
   }
 
@@ -210,6 +251,81 @@ export function apply(ctx) {
   });
   ctx.effect(() => dispose, 'dsh-whiteboard:api');
 
+  const disposeOpenEvents = webServer.register({
+    kind: 'prefix',
+    path: '/dsh-whiteboard/open-events',
+    handler(req, res) {
+      const requestUrl = new URL(req.url || '/', 'http://127.0.0.1');
+      const sessionId = String(requestUrl.searchParams.get('sessionId') || '').replace(/^dsh-whiteboard-/, '');
+      // A stream without identity must never receive an event for another
+      // workspace. The client recreates this stream once its session surface
+      // is available.
+      if (!sessionId) {
+        res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
+        res.end('sessionId required');
+        return;
+      }
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream; charset=utf-8',
+        'Cache-Control': 'no-cache, no-transform',
+        Connection: 'keep-alive'
+      });
+      res.write(': dsh-whiteboard open channel\n\n');
+      let subscribers = state.openSubscribers.get(sessionId);
+      if (!subscribers) {
+        subscribers = new Set();
+        state.openSubscribers.set(sessionId, subscribers);
+      }
+      subscribers.add(res);
+      const remove = () => {
+        subscribers.delete(res);
+        if (!subscribers.size) state.openSubscribers.delete(sessionId);
+      };
+      if (typeof req.on === 'function') req.on('close', remove);
+      if (typeof res.on === 'function') res.on('close', remove);
+      const pending = pendingOpenResult(sessionId);
+      if (pending.open) emitOpenEvent(res, pending);
+    }
+  });
+  ctx.effect(() => disposeOpenEvents, 'dsh-whiteboard:open-events');
+
+  const disposeCommandEvents = webServer.register({
+    kind: 'prefix',
+    path: '/dsh-whiteboard/command-events',
+    handler(req, res) {
+      const requestUrl = new URL(req.url || '/', 'http://127.0.0.1');
+      const sessionId = String(requestUrl.searchParams.get('sessionId') || '').replace(/^dsh-whiteboard-/, '');
+      if (!sessionId) {
+        res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
+        res.end('sessionId required');
+        return;
+      }
+      state.lastSeenAt = Date.now();
+      state.lastSeenBySession.set(sessionId, Date.now());
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream; charset=utf-8',
+        'Cache-Control': 'no-cache, no-transform',
+        Connection: 'keep-alive'
+      });
+      res.write(': dsh-whiteboard command channel\n\n');
+      let subscribers = state.commandSubscribers.get(sessionId);
+      if (!subscribers) {
+        subscribers = new Set();
+        state.commandSubscribers.set(sessionId, subscribers);
+      }
+      subscribers.add(res);
+      const remove = () => {
+        subscribers.delete(res);
+        if (!subscribers.size) state.commandSubscribers.delete(sessionId);
+      };
+      if (typeof req.on === 'function') req.on('close', remove);
+      if (typeof res.on === 'function') res.on('close', remove);
+      const queued = takeCommands(sessionId);
+      if (queued.length) emitCommands(res, queued);
+    }
+  });
+  ctx.effect(() => disposeCommandEvents, 'dsh-whiteboard:command-events');
+
   const tools = [
     {
       name: 'whiteboard_request_open',
@@ -219,7 +335,7 @@ export function apply(ctx) {
       execute: async function (args, exec) {
         captureSession(exec);
         if (!state.sessionId) return { accepted: false, reason: 'sessionId fehlt' };
-        state.openRequests.set(state.sessionId, Date.now());
+        requestOpen(state.sessionId);
         return { accepted: true, requested: true };
       }
     },
@@ -439,14 +555,13 @@ export function apply(ctx) {
     },
     {
       name: 'whiteboard_render_plan',
-      description: 'Execute one validated, generic semantic RenderPlan on the active shared tldraw board. This is an internal host-to-client seam for capabilities such as pages, frames, shape copies, links and assets; PTS or another domain layer owns semantic interpretation. The command is queued as one batch and does not write domain files.',
+      description: 'Execute one validated, generic RenderPlan on the active shared tldraw board. This is an internal host-to-client seam for capabilities such as pages, frames, shape copies, links and assets; the calling domain layer owns semantic interpretation. The command is queued as one batch and does not write domain files.',
       parameters: {
         type: 'object',
         properties: {
           op: { type: 'string', description: 'Must be render-plan.' },
           version: { type: 'string' },
           plan: { type: 'object' },
-          roles: { type: 'object' },
           capabilities: { type: 'array', items: { type: 'string' } }
         },
         required: ['op', 'plan']
@@ -457,7 +572,7 @@ export function apply(ctx) {
         if (!args || args.op !== 'render-plan' || !args.plan || typeof args.plan !== 'object') {
           return { accepted: false, reason: 'render-plan und plan sind erforderlich' };
         }
-        return pushCommand('render-plan', { version: args.version || '1', plan: args.plan, roles: args.roles || {}, capabilities: Array.isArray(args.capabilities) ? args.capabilities.slice(0, 40) : [] });
+        return pushCommand('render-plan', { version: args.version || '1', plan: args.plan, capabilities: Array.isArray(args.capabilities) ? args.capabilities.slice(0, 40) : [] });
       }
     }
   ];
@@ -466,5 +581,5 @@ export function apply(ctx) {
     ctx.effect(() => toolsReg.register(tool), 'tool:' + tool.name);
   }
 
-  console.log('[dsh-whiteboard] host half ready — route /dsh-whiteboard/api, tools: ' + tools.map(t => t.name).join(', '));
+  console.log('[dsh-whiteboard] host half ready — event routes + API registered, tools: ' + tools.map(t => t.name).join(', '));
 }

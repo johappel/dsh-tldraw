@@ -24,6 +24,12 @@ Die ausführliche technische Spezifikation steht in
 [`docs/WHITEBOARD-SPEC.md`](docs/WHITEBOARD-SPEC.md). Die Test- und
 Abnahmeregeln stehen in [`docs/TESTING.md`](docs/TESTING.md).
 
+Bei jeder Änderung von `plugin/dsh-whiteboard`, seiner Browser-/Host-Transporte
+oder der PTS-Renderer-Naht muss zusätzlich
+[`skills/dsh-whiteboard-change/SKILL.md`](skills/dsh-whiteboard-change/SKILL.md)
+verwendet werden. Sie erzwingt einen beobachtbaren Befund, eine einzelne
+falsifizierbare Hypothese und Browser-Evidenz statt wiederholter Annahmen.
+
 ## Vor jeder Änderung
 
 1. Installierte tldraw- und DSH-Version feststellen; die Upstream-Referenz in

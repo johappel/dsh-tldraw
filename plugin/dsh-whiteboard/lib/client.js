@@ -17,6 +17,8 @@ window.__ModuleLoader__.load({
       'https://unpkg.com/tldraw@' + TL_VERSION + '/tldraw.css'
     ];
     var API_BASE = '/dsh-whiteboard/api';
+    var OPEN_EVENTS_URL = '/dsh-whiteboard/open-events';
+    var COMMAND_EVENTS_URL = '/dsh-whiteboard/command-events';
 
     var loadedModules = null;
     var modulesPromise = null;
@@ -39,6 +41,7 @@ window.__ModuleLoader__.load({
     var uiSubs = [];
 
     var clientCtx = { timeout: function (fn, ms) { return setTimeout(fn, ms); } };
+    var commandConsumer = null;
 
     function readLocalStorage(key) {
       try { return window.localStorage.getItem(key); } catch (err) { return null; }
@@ -228,7 +231,14 @@ window.__ModuleLoader__.load({
           inferDarkMode: true,
           onMount: function (editor) {
             editorHolder.editor = editor;
-            hydrateFromServer(editor, loadedModules);
+            hydrateFromServer(editor, loadedModules).then(function () {
+              if (commandConsumer) commandConsumer([], true);
+              // User edits are the only reason for a new snapshot. This
+              // replaces the former fixed-interval snapshot poll.
+              if (editor.store && typeof editor.store.listen === 'function') {
+                editor.store.listen(function () { if (commandConsumer) commandConsumer([], false); });
+              }
+            });
             navigateHash(editor);
             pushUi({ phase: 'ready' });
           }
@@ -551,17 +561,17 @@ window.__ModuleLoader__.load({
       } catch (err3) { return { id: null, name: null, pageCount: 1 }; }
     }
 
-    // Generic semantic presentation layer. The host only queues a validated
-    // plan; this mapping remains PTS-agnostic and can be reused by another
-    // semantic client. Origin is kept separately in meta.actor/sourceActor.
-    var SEMANTIC_STYLE = {
-      learning_moment: { color: 'light-blue', icon: '⚓', label: 'Lernmoment' },
-      method_idea: { color: 'yellow', icon: '💡', label: 'Methodenidee' },
-      open_question: { color: 'light-violet', icon: '?', label: 'Offene Frage' },
-      document_reference: { color: 'light-green', icon: '📄', label: 'Dokument' },
-      material_reference: { color: 'orange', icon: '🧰', label: 'Material' },
-      page_reference: { color: 'blue', icon: '↗', label: 'Denkraum' }
-    };
+    // The generic client receives already-resolved presentation specifications.
+    // Domain semantics and their translation live in the calling domain layer.
+    function presentationStyle(spec, field) {
+      if (!spec || typeof spec !== 'object' || Array.isArray(spec)) throw new Error((field || 'presentation') + ' fehlt');
+      var shape = String(spec.shape || 'note');
+      var color = String(spec.color || '').trim();
+      var label = String(spec.label || '').trim();
+      var icon = spec.icon === undefined ? '' : String(spec.icon);
+      if (shape !== 'note' || !color || color.length > 40 || !label || label.length > 120 || icon.length > 12) throw new Error((field || 'presentation') + ' ist ungültig');
+      return { role: spec.role ? String(spec.role).slice(0, 40) : null, shape: shape, color: color, icon: icon, label: label };
+    }
 
     function pageByName(editor, name) {
       var pages = typeof editor.getPages === 'function' ? (editor.getPages() || []) : [];
@@ -698,27 +708,27 @@ window.__ModuleLoader__.load({
       navigateInternalPageLink(link);
     }
 
-    function renderRoleNote(mods, role, text, x, y, key, extraMeta, href) {
-      var style = SEMANTIC_STYLE[role] || SEMANTIC_STYLE.open_question;
-      var meta = Object.assign({ actor: 'agent', actorLabel: 'PTS Whiteboard Renderer', semanticRole: role,
-        renderKey: 'pts-whiteboard:' + String(key), at: Date.now() }, extraMeta || {});
+    function renderStyledNote(mods, styleSpec, text, x, y, key, extraMeta, href) {
+      var style = presentationStyle(styleSpec, 'element.presentation');
+      var meta = Object.assign({ actor: 'agent', actorLabel: 'DSH Whiteboard',
+        presentationRole: style.role, renderKey: 'renderer:' + String(key), at: Date.now() }, extraMeta || {});
       return { id: uniqueShapeId(mods), type: 'note', x: x, y: y,
         props: { color: style.color, richText: toRichText(style.icon + ' ' + style.label + ': ' + String(text), href) }, meta: meta };
     }
 
-    function pageReference(mods, title, href, x, y, key) {
-      return renderRoleNote(mods, 'page_reference', title, x, y, key, { href: href, pageRef: href }, href);
+    function pageReference(mods, styleSpec, title, href, x, y, key) {
+      return renderStyledNote(mods, styleSpec, title, x, y, key, { href: href, pageRef: href }, href);
     }
 
-    function shapeCopy(mods, source, role, x, y, key) {
+    function shapeCopy(mods, source, styleSpec, x, y, key) {
       var text = propsToText(source.props);
-      return renderRoleNote(mods, role, text, x, y, key, {
+      return renderStyledNote(mods, styleSpec, text, x, y, key, {
         sourceId: source.id, sourceText: text, sourceActor: source.meta && source.meta.actor || 'human'
       });
     }
 
-    function imageShape(mods, editor, element, x, y, key) {
-      if (!element.material || !element.material.href) throw new Error('Bildreferenz ohne sichere PTS-URL');
+    function imageShape(mods, editor, element, styleSpec, x, y, key) {
+      if (!element.material || !element.material.href) throw new Error('Bildreferenz ohne sichere URL');
       if (typeof editor.createAssets !== 'function') throw new Error('tldraw Asset-Seam nicht verfügbar');
       var materialPath = String(element.material.path || '');
       var materialExt = materialPath.toLowerCase().split('.').pop();
@@ -735,8 +745,8 @@ window.__ModuleLoader__.load({
           assetId: assetId, w: w, h: h, playing: true, url: '', crop: null,
           flipX: false, flipY: false, altText: element.material.label || element.material.path
         }, meta: {
-          actor: 'agent', actorLabel: 'PTS Whiteboard Renderer', semanticRole: 'material_reference',
-          renderKey: 'pts-whiteboard:' + String(key), sourcePath: element.material.path
+          actor: 'agent', actorLabel: 'DSH Whiteboard', presentationRole: presentationStyle(styleSpec, 'element.presentation').role,
+          renderKey: 'renderer:' + String(key), sourcePath: element.material.path
         } };
     }
 
@@ -786,10 +796,11 @@ window.__ModuleLoader__.load({
       var detachIds = [];
       for (var di = 0; di < detach.length; di++) {
         var match = String(detach[di].match || '').toLowerCase();
+        var presentationRole = String(detach[di].presentationRole || '');
         var remove = [];
         for (var si = 0; si < all.length; si++) {
           var sm = all[si].meta || {};
-          if (sm.actor === 'agent' && sm.semanticRole === detach[di].role && String(sm.sourceText || '').toLowerCase() === match) remove.push(all[si].id);
+          if (sm.actor === 'agent' && sm.presentationRole === presentationRole && String(sm.sourceText || '').toLowerCase() === match) remove.push(all[si].id);
         }
         if (remove.length) detachIds = detachIds.concat(remove);
       }
@@ -802,42 +813,49 @@ window.__ModuleLoader__.load({
       if (samePage) {
         for (var ri = 0; ri < all.length; ri++) {
           var oldMeta = all[ri].meta || {};
-          if (oldMeta.actor === 'agent' && oldMeta.renderKey === 'pts-whiteboard:back-reference' && oldMeta.pageRef === pageHash(targetPage.id)) {
+          if (oldMeta.actor === 'agent' && oldMeta.renderKey === 'renderer:back-reference' && oldMeta.pageRef === pageHash(targetPage.id)) {
             detachIds.push(all[ri].id);
           }
         }
       }
-      var root = renderRoleNote(mods, 'page_reference', plan.heading && plan.heading.text || targetPage.name, 40, 40, 'workspace-heading', { semanticRole: 'workspace_heading', workspacePageId: targetPage.id });
-      root.type = 'frame'; root.parentId = targetPage.id; root.props = { w: 1120, h: 720, name: plan.heading && plan.heading.text || targetPage.name }; root.meta.semanticRole = 'workspace_heading';
-      var anchorText = plan.heading && plan.heading.text || targetPage.name;
+      var headingStyle = presentationStyle(plan.presentation && plan.presentation.heading, 'presentation.heading');
+      var navigationStyle = presentationStyle(plan.presentation && plan.presentation.navigation, 'presentation.navigation');
+      var root = renderStyledNote(mods, headingStyle, plan.heading && plan.heading.text || targetPage.name, 40, 40, 'workspace-heading', { presentationRole: headingStyle.role, workspacePageId: targetPage.id });
+      root.type = 'frame'; root.parentId = targetPage.id; root.props = { w: 1120, h: 720, name: plan.heading && plan.heading.text || targetPage.name };
       editor.run(function () {
         if (detachIds.length) editor.deleteShapes(detachIds);
         editor.createShapes([root]); created.push(root);
         for (var ei = 0; ei < elements.length; ei++) {
           var el = elements[ei];
-          var x = el.role === 'learning_moment' ? 450 : 360 + (ei % 3) * 270;
-          var y = el.role === 'learning_moment' ? 190 : 420 + Math.floor(ei / 3) * 230;
+          var style = presentationStyle(el.presentation, 'elements[' + ei + '].presentation');
+          var x = style.role === 'anchor' ? 450 : 360 + (ei % 3) * 270;
+          var y = style.role === 'anchor' ? 190 : 420 + Math.floor(ei / 3) * 230;
           var shape;
-          if (el.role === 'learning_moment') shape = renderRoleNote(mods, el.role, anchorText, x, y, el.key, { sourceId: el.ref && el.ref.id || null });
-          else if (el.source === 'existing') shape = shapeCopy(mods, sourceShapes[el.key], el.role, x, y, el.key);
-          else if (el.source === 'material' && el.material.presentation === 'image') shape = imageShape(mods, editor, el, x, y, el.key);
-          else if (el.source === 'material') shape = renderRoleNote(mods, el.role, el.material.label || el.material.path, x, y, el.key, { sourcePath: el.material.path }, el.material.href);
-          else if (el.source === 'document') shape = renderRoleNote(mods, el.role, el.document.label || el.document.path || el.document.documentId, x, y, el.key, { documentId: el.document.documentId || null, sourcePath: el.document.path || null }, el.document.href);
-          else shape = renderRoleNote(mods, el.role, el.text || '', x, y, el.key);
+          if (style.role === 'anchor') {
+            var anchorContent = el.source === 'existing'
+              ? propsToText(sourceShapes[el.key].props)
+              : el.text;
+            shape = renderStyledNote(mods, style, anchorContent, x, y, el.key, { sourceId: el.ref && el.ref.id || null });
+          }
+          else if (el.source === 'existing') shape = shapeCopy(mods, sourceShapes[el.key], style, x, y, el.key);
+          else if (el.source === 'material' && el.material.presentation === 'image') shape = imageShape(mods, editor, el, style, x, y, el.key);
+          else if (el.source === 'material') shape = renderStyledNote(mods, style, el.material.label || el.material.path, x, y, el.key, { sourcePath: el.material.path }, el.material.href);
+          else if (el.source === 'document') shape = renderStyledNote(mods, style, el.document.label || el.document.path || el.document.documentId, x, y, el.key, { documentId: el.document.documentId || null, sourcePath: el.document.path || null }, el.document.href);
+          else shape = renderStyledNote(mods, style, el.text || '', x, y, el.key);
           shape.parentId = targetPage.id;
           editor.createShapes([shape]); created.push(shape); byKey[el.key] = shape;
         }
       });
       var targetRef = pageHash(targetPage.id);
-      if (plan.overview && plan.overview.action === 'ensure_page_reference') {
+      if (plan.overview && plan.overview.action === 'ensure_navigation_reference') {
         await activatePage(editor, sourcePage.id);
         var refX = sourceBounds ? sourceBounds.x + sourceBounds.w + 30 : 80;
         var refY = sourceBounds ? sourceBounds.y : 80;
-        editor.run(function () { var overviewShape = pageReference(mods, plan.overview.label || 'Denkraum öffnen: ' + plan.page.title, targetRef, refX, refY, 'overview-reference'); overviewShape.parentId = sourcePage.id; editor.createShapes([overviewShape]); });
+        editor.run(function () { var overviewShape = pageReference(mods, navigationStyle, plan.overview.label || 'Denkraum öffnen: ' + plan.page.title, targetRef, refX, refY, 'overview-reference'); overviewShape.parentId = sourcePage.id; editor.createShapes([overviewShape]); });
         await activatePage(editor, targetPage.id);
       }
       await waitForCurrentPage(editor, targetPage.id);
-      if (!samePage) editor.run(function () { var backShape = pageReference(mods, '↩ Zur Übersicht', pageHash(sourcePage.id), 70, 650, 'back-reference'); backShape.parentId = targetPage.id; editor.createShapes([backShape]);
+      if (!samePage) editor.run(function () { var backShape = pageReference(mods, navigationStyle, '↩ Zur Übersicht', pageHash(sourcePage.id), 70, 650, 'back-reference'); backShape.parentId = targetPage.id; editor.createShapes([backShape]);
       var links = Array.isArray(plan.links) ? plan.links : [];
       for (var li = 0; li < links.length; li++) {
         var from = byKey[links[li].from], to = byKey[links[li].to];
@@ -846,7 +864,7 @@ window.__ModuleLoader__.load({
         var arrowId = uniqueShapeId(mods);
         editor.createShapes([{ id: arrowId, type: 'arrow', parentId: targetPage.id, x: fb.x + fb.w / 2, y: fb.y + fb.h / 2,
           props: { color: 'light-violet', start: { x: 0, y: 0 }, end: { x: tb.x + tb.w / 2 - (fb.x + fb.w / 2), y: tb.y + tb.h / 2 - (fb.y + fb.h / 2) }, text: links[li].label || '' },
-          meta: { actor: 'agent', actorLabel: 'PTS Whiteboard Renderer', semanticRole: 'link' } }]);
+          meta: { actor: 'agent', actorLabel: 'DSH Whiteboard', presentationRole: navigationStyle.role } }]);
         createArrowBindings(editor, arrowId, from.id, to.id);
       }
       });
@@ -1294,6 +1312,17 @@ window.__ModuleLoader__.load({
       }, [sessionId]);
 
       React.useEffect(function () {
+        if (!sessionId || typeof EventSource !== 'function') return;
+        var source = new EventSource(COMMAND_EVENTS_URL + '?sessionId=' + encodeURIComponent(sessionId));
+        source.addEventListener('whiteboard-commands', function (event) {
+          var message;
+          try { message = JSON.parse(event.data || '{}'); } catch (error) { return; }
+          if (commandConsumer) commandConsumer(Array.isArray(message.commands) ? message.commands : [], true);
+        });
+        return function () { source.close(); };
+      }, [sessionId]);
+
+      React.useEffect(function () {
         var isOpen = sidebarExpanded === true && tabVisible !== false;
         if (isOpen) {
           // Mark the preference only after the tab is observably open. During
@@ -1537,12 +1566,11 @@ window.__ModuleLoader__.load({
 
       React.useEffect(function () {
         var opening = false;
-        var knownSession = sessionId || readLocalStorage(LAST_SESSION_KEY);
-        function openBoard() {
+        function openBoard(targetSessionId) {
           if (opening || !sidebarRef.open) return false;
           opening = true;
           var opened = false;
-          try { opened = sidebarRef.open(TYPE_KIND) === true; } catch (err) {}
+          try { opened = sidebarRef.open(TYPE_KIND, targetSessionId || sessionId) === true; } catch (err) {}
           if (opened) rememberBoardOpen();
           clientCtx.timeout(function () { opening = false; }, opened ? 1000 : 120);
           return opened;
@@ -1553,18 +1581,28 @@ window.__ModuleLoader__.load({
           if ((attempts || 0) < 120) clientCtx.timeout(function () { openPreferred((attempts || 0) + 1); }, 100);
         }
         openPreferred(0);
-        var poll = setInterval(function () {
-          if (opening) return;
-          apiCall('wb-open-poll', { sessionId: knownSession || null }).then(function (result) {
-            if (result && result.open) openBoard();
-          }).catch(function () {});
-        }, 600);
-        return function () { clearInterval(poll); };
+        // One session-bound EventSource replaces the previous short-interval
+        // XHR poll. It remains idle without HTTP responses and the host emits
+        // only when a renderer asks to open this exact session's board.
+        if (!sessionId || typeof EventSource !== 'function') return;
+        var source = new EventSource(OPEN_EVENTS_URL + '?sessionId=' + encodeURIComponent(sessionId));
+        source.addEventListener('whiteboard-open', function (event) {
+          var result;
+          try { result = JSON.parse(event.data || '{}'); } catch (error) { return; }
+          if (result && result.open && openBoard(result.sessionId)) {
+              // The host keeps the request until the sidebar controller has
+              // accepted the open. This closes the retry window only after a
+              // real openTab call, not after a transient missing session
+              // surface error.
+              apiCall('wb-open-ack', { sessionId: result.sessionId || sessionId || null }).catch(function () {});
+          }
+        });
+        return function () { source.close(); };
       }, [sessionId]);
       return React.createElement('button', {
         className: 'wb-opener',
         title: 'Gemeinsames tldraw-Whiteboard in der rechten Sidebar öffnen',
-        onClick: function () { rememberBoardOpen(); if (sidebarRef.open) sidebarRef.open(TYPE_KIND); }
+        onClick: function () { rememberBoardOpen(); if (sidebarRef.open) sidebarRef.open(TYPE_KIND, sessionId); }
       }, '🧩 Board' + (ui.counts && ui.counts.notes ? ' · ' + ui.counts.notes : ''));
     }
 
@@ -1615,8 +1653,12 @@ window.__ModuleLoader__.load({
         console.error('[dsh-whiteboard] sidebarRight/sidebarRightTabs nicht verfügbar — Board-Tab kann nicht registriert werden');
         return;
       }
-      sidebarRef.open = function (kind) {
-        try { sidebarRight.openTab(kind); return true; } catch (err) {
+      sidebarRef.open = function (kind, targetSessionId) {
+        try {
+          if (targetSessionId && typeof sidebarRight.openTabIn === 'function') sidebarRight.openTabIn(targetSessionId, kind);
+          else sidebarRight.openTab(kind);
+          return true;
+        } catch (err) {
           // During the first shell render the controller exists before the
           // session surface does. This is an expected retry condition, not a
           // broken Whiteboard; keep other failures visible.
@@ -1706,7 +1748,10 @@ window.__ModuleLoader__.load({
       // distinguish a live empty board from a client that is not mounted.
       var lastBoardSig = null;
       var lastDiffSnapshot = null;
-      var pollTimer = setInterval(function () {
+      var pendingCommands = [];
+      var syncScheduled = false;
+      var forceSync = false;
+      function syncBoard(commands, forced) {
         if (busy) return;
         var editor = editorHolder.editor;
         if (!editor) return;
@@ -1714,11 +1759,7 @@ window.__ModuleLoader__.load({
         try { if (editor.getCrashingError && editor.getCrashingError()) return; } catch (err0) {}
         busy = true;
         Promise.resolve()
-          .then(function () {
-            return apiCall('wb-poll', { sessionId: activeSessionId() });
-          })
-          .then(async function (res) {
-            var commands = (res && res.commands) || [];
+          .then(async function () {
             var results = [];
             var mods = loadedModules;
             for (var i = 0; i < commands.length; i++) {
@@ -1744,7 +1785,7 @@ window.__ModuleLoader__.load({
             var boardChanged = boardSig !== lastBoardSig || serverRetryRequested;
             lastBoardSig = boardSig;
             serverRetryRequested = false;
-            var mustPush = changed || boardChanged || results.length;
+            var mustPush = forced || changed || boardChanged || results.length;
             if (!mustPush) return;
             if (results.length) showPanelBriefly(5000);
             if (boardChanged && lastDiffSnapshot) recordChanges(lastDiffSnapshot, snap);
@@ -1763,12 +1804,24 @@ window.__ModuleLoader__.load({
             console.error('[dsh-whiteboard] snapshot poll failed', err);
             pushActivity('⚠️ Snapshot fehlgeschlagen: ' + truncate(message, 120));
           })
-          .then(function () { busy = false; });
-      }, 450);
-
-      ctx.effect(function () {
-        return function () { clearInterval(pollTimer); };
-      }, 'poll-timer');
+          .then(function () {
+            busy = false;
+            if (pendingCommands.length || forceSync) commandConsumer([], false);
+          });
+      }
+      commandConsumer = function (commands, force) {
+        if (Array.isArray(commands) && commands.length) pendingCommands = pendingCommands.concat(commands);
+        if (force) forceSync = true;
+        if (syncScheduled || busy) return;
+        syncScheduled = true;
+        clientCtx.timeout(function () {
+          syncScheduled = false;
+          var queued = pendingCommands.splice(0, pendingCommands.length);
+          var forced = forceSync;
+          forceSync = false;
+          syncBoard(queued, forced);
+        }, pendingCommands.length ? 0 : 250);
+      };
     }
 
     return {

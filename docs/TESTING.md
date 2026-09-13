@@ -66,6 +66,13 @@ werden; eine reine Chat-Antwort reicht nicht.
 - Falsche tldraw-Props dürfen weder den Poll-Loop noch die gesamte DSH-Seite
   unkontrolliert beenden.
 
+### Netzwerk-Leerlauf
+
+Bei drei Sekunden Leerlauf darf es keine wiederholten leeren Open- oder
+Command-Request/Response-Zyklen geben. Dauerhafte, sessiongebundene
+Event-Verbindungen sind zulässig; ein Renderauftrag darf nur an seine eigene
+Session ausgeliefert werden.
+
 ## Abnahmeprotokoll
 
 ```text
@@ -80,4 +87,3 @@ Console-/Runtime-Fehler:
 Testartefakte:
 Offene Grenzen:
 ```
-
