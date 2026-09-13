@@ -1,0 +1,19 @@
+{
+  "name": "dsh-whiteboard",
+  "version": "0.1.0",
+  "description": "Gemeinsames tldraw-Whiteboard als DSH-Session-Tab und Detailsspalte mit Agenten-Tools für Brainstorming und Clustern.",
+  "private": true,
+  "type": "module",
+  "main": "./lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "client": {
+      "inject": [],
+      "platform": "web"
+    }
+  }
+}
