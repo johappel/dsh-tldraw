@@ -1,0 +1,22 @@
+{
+  "version": 2,
+  "sessionId": "session-c3d65277-3fc6-4af3-837a-bee02476401d",
+  "cwd": "F:\\code\\dsh-tldraw",
+  "updatedAt": 1789393915433,
+  "checkpoints": [
+    {
+      "turn": 1,
+      "commit": "82dba42b463952ef7acd6a6e598ec9fc7ff23cd5",
+      "parent": "82dba42b463952ef7acd6a6e598ec9fc7ff23cd5",
+      "time": 1789392941579,
+      "untracked": [],
+      "truncated": false,
+      "after": {
+        "commit": "c888a70bda5834ed95dc61e377910b4e29b8ef7f",
+        "time": 1789393915041
+      }
+    }
+  ],
+  "rolls": [],
+  "undos": []
+}

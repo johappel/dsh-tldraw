@@ -79,6 +79,11 @@ werden; eine reine Chat-Antwort reicht nicht.
 - Im Seitenmenü eine zweite Seite anlegen, ihr Untermenü öffnen und „Löschen“
   wählen: Die Seite verschwindet unmittelbar, der verbleibende Stand wird
   nach dem nächsten Store-Listener-Sync wieder geladen.
+- Eine **menschliche** Aktion an einem Objekt, das der Renderer angelegt hat
+  (Zettel verschieben, Text ändern, Reparenting), protokolliert den Vorgang,
+  darf das Whiteboard-Log aber **nicht** automatisch einblenden. Nur eine
+  tatsächlich ausgeführte Agentenaktion öffnet das Auto-Fenster; ein replayed
+  Ack derselben `commandId` zählt nicht als Aktion.
 
 ### Netzwerk-Leerlauf
 

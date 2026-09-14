@@ -38,7 +38,7 @@ window.__ModuleLoader__.load({
     var migrationLastKey = null;
     var migrationRunning = false;
     var panelOpenFlag = false;      // vom Menschen gesetzt; Standard: ausgeblendet
-    var panelAutoUntil = 0;         // Auto-Einblendung nach Agentenänderungen
+    var panelAutoUntil = 0;         // Auto-Einblendung nur nach ausgeführter Agentenaktion
     var sidebarRef = { open: null };
     var uiState = { counts: { notes: 0, human: 0, agent: 0, proposals: 0 }, notes: [], proposals: [], selection: [], activity: [], phase: 'loading', error: '' };
     var uiSubs = [];
@@ -320,7 +320,7 @@ window.__ModuleLoader__.load({
       pushUi({ activity: [text].concat(uiState.activity).slice(0, 8) });
     }
 
-    /** Beiträge-Panel kurz einblenden (z. B. nach einer Agentenänderung am Board). */
+    /** Log kurz einblenden — nur für eine soeben ausgeführte Agentenaktion. */
     function showPanelBriefly(ms) {
       var span = ms || 5000;
       panelAutoUntil = Date.now() + span;
@@ -1620,21 +1620,23 @@ window.__ModuleLoader__.load({
       return parts.join('|');
     }
 
-    function recordChanges(prev, next) {
+    // `actionByAgent` beschreibt die soeben ausgeführte Aktion, nicht den
+    // Ersteller eines Objekts. Nur eine Agentenaktion blendet das Log kurz ein;
+    // eine menschliche Aktion an einem früher vom Renderer angelegten Objekt
+    // schreibt nur ins Protokoll. Ebenso benennt der Suffix den Urheber der
+    // Änderung, nicht den Besitzer des Objekts.
+    function recordChanges(prev, next, actionByAgent) {
       try {
-        var diffs = diffSnapshots(prev, next);
-        var agentTouched = false;
-        for (var i = 0; i < diffs.length; i++) {
-          changeLog.push({ at: Date.now(), text: diffs[i] });
-          if (diffs[i].indexOf('(Agent)') >= 0) agentTouched = true;
-        }
+        var byAgent = actionByAgent === true;
+        var diffs = diffSnapshots(prev, next, byAgent);
+        for (var i = 0; i < diffs.length; i++) changeLog.push({ at: Date.now(), text: diffs[i] });
         if (changeLog.length > 80) changeLog = changeLog.slice(-80);
-        // Agent hat das Board verändert → Panel kurz zeigen, dann wieder Ruhe.
-        if (agentTouched) showPanelBriefly(5000);
+        if (byAgent) showPanelBriefly(5000);
       } catch (err) {}
     }
 
-    function diffSnapshots(prev, next) {
+    function diffSnapshots(prev, next, actionByAgent) {
+      var byAgent = actionByAgent === true;
       var out = [];
       var prevNotes = {};
       var i;
@@ -1647,10 +1649,10 @@ window.__ModuleLoader__.load({
         nextIds[n.id] = true;
         var p = prevNotes[n.id];
         if (!p) {
-          out.push('neuer Zettel „' + truncate(n.text, 30) + '“' + (n.actor === 'agent' ? ' (Agent)' : ' (Mensch)'));
+          out.push('neuer Zettel „' + truncate(n.text, 30) + '“' + (byAgent ? ' (Agent)' : ' (Mensch)'));
           continue;
         }
-        var who = (n.actor === 'agent' || n.movedBy === 'agent') ? ' (Agent)' : '';
+        var who = byAgent ? ' (Agent)' : '';
         if (p.text !== n.text) {
           out.push('Zettel geändert: „' + truncate(p.text, 22) + '“ → „' + truncate(n.text, 22) + '“' + who);
         }
@@ -1662,7 +1664,7 @@ window.__ModuleLoader__.load({
         }
       }
       for (i = 0; i < pn.length; i++) {
-        if (!nextIds[pn[i].id]) out.push('Zettel entfernt: „' + truncate(pn[i].text, 24) + '“' + (pn[i].actor === 'agent' ? ' (Agent)' : ''));
+        if (!nextIds[pn[i].id]) out.push('Zettel entfernt: „' + truncate(pn[i].text, 24) + '“' + (byAgent ? ' (Agent)' : ''));
       }
       var prevFrames = {};
       var pf = prev.frames || [];
@@ -1673,7 +1675,7 @@ window.__ModuleLoader__.load({
         nextFrameIds[nf[i].id] = true;
         var f = nf[i];
         var fp = prevFrames[f.id];
-        var fwho = f.actor === 'agent' ? ' (Agent)' : '';
+        var fwho = byAgent ? ' (Agent)' : '';
         if (!fp) out.push('neuer Container: „' + truncate(f.name, 30) + '“' + fwho);
         else if (fp.name !== f.name) out.push('Container umbenannt: „' + truncate(fp.name, 22) + '“ → „' + truncate(f.name, 22) + '“' + fwho);
         else if (fp.proposal !== f.proposal) out.push('Vorschlag „' + truncate(f.name, 24) + '“ ' + (f.proposal ? 'wieder offen' : 'übernommen') + fwho);
@@ -1979,7 +1981,7 @@ window.__ModuleLoader__.load({
           triggerRow,
           React.createElement('button', {
             className: 'wb-btn',
-            title: 'Whiteboard-Log: Änderungen seit dem letzten Feedback, Zettel-Liste, Cluster-Vorschläge, Aktivitätsprotokoll. Blendet sich nach Agentenänderungen automatisch kurz ein.',
+            title: 'Whiteboard-Log: Änderungen seit dem letzten Feedback, Zettel-Liste, Cluster-Vorschläge, Aktivitätsprotokoll. Blendet sich nur nach einer ausgeführten Agentenaktion automatisch kurz ein — eine menschliche Änderung wird protokolliert, blendet das Log aber nie ein.',
             onClick: function () { panelOpenFlag = !panelVisible; panelAutoUntil = 0; pushUi(); }
           }, panelVisible ? '📋 Log ausblenden' : '📋 Log einblenden')
         ),
@@ -2238,6 +2240,10 @@ window.__ModuleLoader__.load({
           .then(async function () {
             var results = [];
             var mods = loadedModules;
+            // Nur eine wirklich ausgeführte Agentenaktion darf das Log
+            // einblenden. Eine erneut zugestellte (replayed) ID ist keine
+            // Aktion und bleibt für die Anzeige folgenlos.
+            var executedAgentActions = 0;
             for (var i = 0; i < commands.length; i++) {
               var commandId = commands[i] && commands[i].commandId ? String(commands[i].commandId) : '';
               var completedKey = commandId ? String(activeSessionId() || '') + '\u0000' + commandId : '';
@@ -2249,11 +2255,13 @@ window.__ModuleLoader__.load({
                 await execCommand(mods, editor, commands[i]);
                 if (completedKey) completedCommandIds[completedKey] = true;
                 results.push({ commandId: commandId || undefined, op: commands[i].op, ok: true });
+                executedAgentActions++;
                 pushActivity('🤖 Agent: ' + describeCommand(commands[i]));
               } catch (err) {
                 var commandError = String(err && err.message || err);
                 try { console.error('[dsh-whiteboard] command failed', commands[i] && commands[i].op, commandError, err); } catch (diagErr) {}
                 results.push({ commandId: commandId || undefined, op: commands[i] && commands[i].op, ok: false, error: commandError });
+                executedAgentActions++;
                 pushActivity('⚠️ Agent-Aktion fehlgeschlagen (' + (commands[i] && commands[i].op) + ')');
               }
             }
@@ -2270,8 +2278,15 @@ window.__ModuleLoader__.load({
             serverRetryRequested = false;
             var mustPush = forced || changed || boardChanged || results.length;
             if (!mustPush) return;
-            if (results.length) showPanelBriefly(5000);
-            if (boardChanged && lastDiffSnapshot) recordChanges(lastDiffSnapshot, snap);
+            // Die Anzeige richtet sich nach der soeben ausgeführten Aktion,
+            // nicht nach dem Ersteller eines Objekts: nur eine wirklich
+            // ausgeführte Agentenaktion blendet das Log kurz ein. Eine
+            // menschliche Verschiebung/Änderung — auch an einem zuvor vom
+            // Renderer angelegten Zettel — protokolliert nur und lässt das Log
+            // in Ruhe. Replayed-Acks sind keine Aktion.
+            var agentActionExecuted = executedAgentActions > 0;
+            if (boardChanged && lastDiffSnapshot) recordChanges(lastDiffSnapshot, snap, agentActionExecuted);
+            else if (agentActionExecuted) showPanelBriefly(5000);
             lastDiffSnapshot = snap;
             var summarySave = apiCall('wb-snapshot', Object.assign({ sessionId: activeSessionId() }, snap)).catch(function (error) {
               // The compact live summary and the durable full snapshot are

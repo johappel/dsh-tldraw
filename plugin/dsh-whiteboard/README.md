@@ -17,8 +17,8 @@ mit Herkunft und Hash versioniert.
 - **Öffner-Chip „🧩 Board"** unten rechts (`shell.overlay`) sowie eine Kachel auf der Guide-Seite der Sidebar
 - **Akteur-Attribution** — Agenten-Zettel violett, `meta.actor`, Badges im Whiteboard-Log, Aktivitätsprotokoll
 - **Agenten-Trigger in der Kopfzeile** — `🤖 Dazu fragen` (schickt die aktuelle Auswahl mit, Zähler = Anzahl ausgewählter Zettel), `🔍 Feedback` (kurzes Feedback zu den Änderungen seit dem letzten Feedback, Zähler = offene Änderungen), `🤖 Cluster vorschlagen`, `🤖 Ideen ergänzen`. Technik: Standard-Prop `inputActions` (`setDraft` + `submit`)
-- **Änderungs-Tracker** — der Client vergleicht aufeinanderfolgende Snapshots und protokolliert neue/verschobene/geänderte/entfernte Zettel samt Akteur; das Delta steht im Whiteboard-Log und geht in den Feedback-Prompt ein
-- **Whiteboard-Log statt Dauer-Panel** — standardmäßig ausgeblendet; nach einer Agentenänderung am Board (oder nach einem Agenten-Turn) blendet es sich ~5 s ein und danach wieder aus. `📋 Log einblenden` heftet es dauerhaft an, `📋 Log ausblenden` löst die Heftung wieder
+- **Änderungs-Tracker** — der Client vergleicht aufeinanderfolgende Snapshots und protokolliert neue/verschobene/geänderte/entfernte Zettel; das Delta steht im Whiteboard-Log und geht in den Feedback-Prompt ein
+- **Whiteboard-Log statt Dauer-Panel** — standardmäßig ausgeblendet; nur eine wirklich ausgeführte **Agentenaktion** am Board blendet es ~5 s ein und danach wieder aus. Eine menschliche Aktion blendet es **nie** ein — auch dann nicht, wenn sie ein Objekt betrifft, das zuvor der Renderer angelegt hat; sie wird nur protokolliert. `📋 Log einblenden` heftet es dauerhaft an, `📋 Log ausblenden` löst die Heftung wieder
 - **Unverbindliche Vorschläge** — Cluster-Frames und Pfeile sind Vorschläge; „Übernehmen" macht sie strukturell (Reparenting), „Verwerfen" löscht nur den Container
 - **Agenten-Tools** (9): `whiteboard_state`, `whiteboard_add_note`, `whiteboard_rename_cluster`, `whiteboard_propose_clusters`, `whiteboard_arrange_sequence`, `whiteboard_connect_notes`, `whiteboard_bind_frame`, `whiteboard_frame_to_back`, `whiteboard_highlight_notes`
 
