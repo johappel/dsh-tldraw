@@ -171,6 +171,61 @@ window.__ModuleLoader__.load({
       });
     }
 
+    // A workspace heading names a *place* on the board, not a document-wide
+    // singleton. The render path replaces a workspace only on the same page
+    // with the same title (see `workspaceIdentity`). The reload path therefore
+    // has to group by that same identity: grouping by `renderKey` alone merged
+    // every renderer frame of the whole document into one group and kept only
+    // the newest one, which deleted the other workspaces on the next load.
+    // The historical key of the earlier renderer names the same kind of shape.
+    function isWorkspaceHeadingKey(renderKey) {
+      var key = String(renderKey);
+      return key === 'renderer:workspace-heading' || key === 'pts-whiteboard:workspace-heading';
+    }
+
+    // The identity is derived from a frame and reused by its cards; a card of a
+    // removed duplicate frame must resolve to the same group as the surviving
+    // frame, which is why the frames themselves are not filtered out here.
+    function workspaceGroupIdentity(record) {
+      var meta = record.meta || {};
+      var pageKey = normalizePageId(record.parentId);
+      var workspaceKey = meta.workspaceKey
+        ? workspaceIdentity(meta.workspaceKey)
+        : workspaceIdentity(record.props && record.props.name);
+      return pageKey + '\u0000' + workspaceKey;
+    }
+
+    // A rendered card belongs to the workspace it was rendered into. Element
+    // keys are per render, not per board (`renderer:c1`, `renderer:p1`), so two
+    // workspaces of the same board legitimately carry the same element key. A
+    // plain `renderKey` group would treat the older card as a duplicate of the
+    // newer one and empty the older workspace, which is the same defect as the
+    // frame rule one level down. Cards outside every workspace keep the plain
+    // document-wide rule.
+    function rendererOwnerIdentity(record, byId) {
+      var parentId = record.parentId;
+      for (var depth = 0; parentId && depth < 8; depth++) {
+        var parent = byId[parentId];
+        if (!parent) return '';
+        if (parent.type === 'frame') {
+          return isWorkspaceHeadingKey((parent.meta || {}).renderKey) ? workspaceGroupIdentity(parent) : '';
+        }
+        parentId = parent.parentId;
+      }
+      return '';
+    }
+
+    function rendererDedupeGroupKey(record, byId) {
+      var meta = record.meta || {};
+      var key = String(meta.renderKey);
+      // Both key spellings name the same kind of place: a board that still
+      // carries a frame from the earlier renderer and one from this renderer
+      // must collapse to the same workspace, not keep two identical frames.
+      if (isWorkspaceHeadingKey(key)) return 'workspace\u0000' + workspaceGroupIdentity(record);
+      var owner = rendererOwnerIdentity(record, byId);
+      return owner ? key + '\u0000' + owner : key;
+    }
+
     function dedupeRendererSnapshot(snapshot) {
       if (!snapshot || typeof snapshot !== 'object') return { snapshot: snapshot, removed: 0 };
       var copy;
@@ -178,11 +233,13 @@ window.__ModuleLoader__.load({
       var store = copy && copy.document && copy.document.store;
       if (!store || typeof store !== 'object' || Array.isArray(store)) return { snapshot: copy, removed: 0 };
       var records = Object.keys(store).map(function (key) { return store[key]; }).filter(Boolean);
+      var byId = {};
+      for (var b = 0; b < records.length; b++) byId[records[b].id] = records[b];
       var byRenderKey = {};
       for (var i = 0; i < records.length; i++) {
         var record = records[i];
         if (record.typeName !== 'shape' || !record.meta || record.meta.actor !== 'agent' || !record.meta.renderKey) continue;
-        var key = String(record.meta.renderKey);
+        var key = rendererDedupeGroupKey(record, byId);
         if (!byRenderKey[key]) byRenderKey[key] = [];
         byRenderKey[key].push(record);
       }

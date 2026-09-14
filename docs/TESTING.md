@@ -76,6 +76,26 @@ werden; eine reine Chat-Antwort reicht nicht.
 - Wiederholte Zustellung desselben Renderauftrags darf keine zweiten
   agenteneigenen `renderer:*`-Shapes erzeugen; ein Reload bereinigt vorhandene
   Render-Key-Duplikate deterministisch.
+- **Reload-Sicherheit von Arbeitsräumen:** Zwei (oder mehr) agentenerzeugte
+  Arbeitsrahmen mit **verschiedenen** Titeln — auf derselben oder auf
+  verschiedenen Seiten — müssen einen Instanz-/Seiten-Reload überstehen.
+  Die Reload-Bereinigung gruppiert einen Arbeitsrahmen nach Seite plus
+  `workspaceKey`/Titel; nur ein Rahmen **desselben** Arbeitsraums auf
+  **derselben** Seite gilt als Duplikat und wird auf den neuesten reduziert.
+  Ebenso wichtig: Renderer-Karten werden zusätzlich nach ihrem Arbeitsraum
+  gruppiert, weil Element-Keys (`renderer:c1`, `renderer:p1`) pro Render und
+  nicht pro Board vergeben werden. Ohne diese Bindung leert ein Reload den
+  älteren Arbeitsraum, obwohl er selbst stehen bleibt.
+  Der Test dazu läuft die echte Bereinigung gegen Snapshots aus (nicht gegen
+  Quelltext) und deckt ab: zwei Titel auf einer Seite, drei nach einer
+  Erweiterung, derselbe Titel auf zwei Seiten, echter Duplikatfall, derselbe
+  Element-Key in zwei Arbeitsräumen, wiederholter Karten-`renderKey`,
+  historischer `pts-whiteboard:`-Heading-Key und die Unversehrtheit
+  menschlicher Shapes. Zusätzlich gegen die realen Snapshots der Instanz
+  geprüft: kein Arbeitsrahmen und kein Element-Key verschwindet ohne Zwilling.
+  Abnahme zusätzlich im Browser: Auftrag A rendern, Auftrag B mit neuem Titel
+  daneben rendern, Instanz neu laden — beide Arbeitsräume stehen weiterhin mit
+  ihren Karten.
 - Im Seitenmenü eine zweite Seite anlegen, ihr Untermenü öffnen und „Löschen“
   wählen: Die Seite verschwindet unmittelbar, der verbleibende Stand wird
   nach dem nächsten Store-Listener-Sync wieder geladen.

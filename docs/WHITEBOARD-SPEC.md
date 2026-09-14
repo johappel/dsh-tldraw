@@ -90,6 +90,23 @@ ehrlicher `blocked`-Zustand; der Agent darf keinen Erfolg behaupten.
   vorhandene Frames zu löschen. Vor dem Löschen eines Frames werden alle nicht
   renderer-eigenen Kinder (menschliche Zettel, Pfeile, fremde Arbeitsräume) auf
   die Seite umgehängt, damit die tldraw-Löschkaskade sie nicht mitreißt.
+- Die Reload-Bereinigung (`dedupeRendererSnapshot`) gruppiert einen
+  Arbeitsrahmen nach **demselben** Identitätsbegriff wie der Render-Pfad: Seite
+  plus `workspaceKey` beziehungsweise normalisierter Titel. Ein `renderKey`
+  allein ist dokumentweit nicht eindeutig — er würde alle Arbeitsräume aller
+  Seiten zu einer Gruppe verschmelzen und nur den neuesten stehen lassen.
+  Beide Schreibweisen des Heading-Schlüssels (`renderer:` und das historische
+  `pts-whiteboard:`) bezeichnen dieselbe Art Ort und werden auf **eine** Gruppe
+  abgebildet; ein Board, das einen alten und einen neuen Rahmen desselben
+  Arbeitsraums trägt, reduziert sie daher auf einen statt zwei zu behalten.
+- **Element-Keys sind pro Render, nicht pro Board.** Der Renderer vergibt seine
+  Karten-Keys aus dem RenderPlan (`renderer:c1`, `renderer:p1`, …). Zwei
+  Arbeitsräume desselben Boards tragen deshalb legitim denselben Element-Key.
+  Die Reload-Bereinigung gruppiert eine Karte zusätzlich nach ihrem
+  Arbeitsraum: nur eine wiederholte Lieferung **innerhalb desselben**
+  Arbeitsraums gilt als Duplikat. Karten außerhalb eines Arbeitsraums behalten
+  die dokumentweite Regel. Ohne diese Bindung würde die ältere Karte als
+  Duplikat der neueren gelten und ihr Arbeitsraum leer zurückbleiben.
 - Der generische Template-Katalog umfasst `comparison`, `pro_con`,
   `cause_effect`, `sequence`, `cluster`, `matrix` und `timeline`.
   Vergleichsformen haben feste Freitext-Überschriften und horizontale/vertikale

@@ -155,3 +155,168 @@ test('the style panel override never rebuilds the editor or the components objec
   assert.equal(roots.length, 2, 'one board root plus the throwaway migration root');
   assert.match(client, /boardRoot = mods\.reactDomClient\.createRoot\(boardHost\);/);
 });
+
+test('a reload keeps every renderer workspace, and only really repeated render keys are cleaned up', () => {
+  // The reported symptom: after a reload, workspaces the agent had added were
+  // gone. Grouping by `renderKey` alone put every renderer frame of the whole
+  // document into one group, so only the newest frame survived. This test runs
+  // the real reload-time normalization against snapshots, not against source
+  // text, and asserts the observable outcome.
+  const dedupe = loadDedupeRendererSnapshot();
+
+  const pageA = 'page:uebersicht';
+  const pageB = 'page:lernmoment';
+  const frame = (id, pageId, name, key, at) => ({
+    id, typeName: 'shape', type: 'frame', parentId: pageId, x: 0, y: 0, index: 'a1',
+    props: { w: 1120, h: 720, name },
+    meta: { actor: 'agent', actorLabel: 'DSH Whiteboard', presentationRole: 'anchor', renderKey: 'renderer:workspace-heading', at, workspacePageId: pageId, workspaceKey: key },
+  });
+  const card = (id, parentId, key, at) => ({
+    id, typeName: 'shape', type: 'note', parentId, x: 0, y: 0, index: 'a1', props: {},
+    meta: { actor: 'agent', actorLabel: 'DSH Whiteboard', renderKey: 'renderer:' + key, at },
+  });
+  const snapshotOf = (...records) => {
+    const store = {};
+    store['document:document'] = { id: 'document:document', typeName: 'document' };
+    for (const record of records) store[record.id] = record;
+    return { document: { store }, session: {} };
+  };
+  const framesOf = (snapshot) => Object.values(snapshot.document.store)
+    .filter((record) => record.typeName === 'shape' && record.type === 'frame')
+    .map((record) => record.props.name)
+    .sort();
+  const cardsOf = (snapshot) => Object.values(snapshot.document.store)
+    .filter((record) => record.typeName === 'shape' && record.type !== 'frame')
+    .map((record) => record.id)
+    .sort();
+
+  // 1. Two different workspaces on the same page: a reload must keep both,
+  //    together with their cards.
+  const twoWorkspaces = snapshotOf(
+    frame('shape:f1', pageA, 'Pro & Contra', 'pro & contra', 1000),
+    card('shape:c1', 'shape:f1', 'pro', 1001),
+    frame('shape:f2', pageA, 'Lernmoment (Entwurf)', 'lernmoment (entwurf)', 2000),
+    card('shape:c2', 'shape:f2', 'lernmoment', 2001),
+  );
+  const kept = dedupe(twoWorkspaces);
+  assert.equal(kept.removed, 0, 'two differently titled workspaces must both survive a reload');
+  assert.deepEqual(framesOf(kept.snapshot), ['Lernmoment (Entwurf)', 'Pro & Contra']);
+  assert.deepEqual(cardsOf(kept.snapshot), ['shape:c1', 'shape:c2']);
+
+  // 2. A third render extends the board; the next reload still keeps all three.
+  const extended = snapshotOf(
+    ...Object.values(kept.snapshot.document.store).filter((record) => record.typeName === 'shape'),
+    frame('shape:f3', pageA, 'Ausblick', 'ausblick', 3000),
+    card('shape:c3', 'shape:f3', 'ausblick', 3001),
+  );
+  const afterExtension = dedupe(extended);
+  assert.equal(afterExtension.removed, 0, 'an extension must not be undone by the next reload');
+  assert.deepEqual(framesOf(afterExtension.snapshot), ['Ausblick', 'Lernmoment (Entwurf)', 'Pro & Contra']);
+
+  // 3. The same title on two different pages stays two workspaces.
+  const twoPages = snapshotOf(
+    frame('shape:p1', pageA, 'Erntedank', 'erntedank', 1000),
+    frame('shape:p2', pageB, 'Erntedank', 'erntedank', 2000),
+  );
+  assert.equal(dedupe(twoPages).removed, 0, 'the page is part of a workspace identity');
+
+  // 4. Re-rendering the very same workspace (same page, same title) is still
+  //    cleaned up: exactly one frame survives, the newest.
+  const rerendered = snapshotOf(
+    frame('shape:old', pageA, 'Erntedank', 'erntedank', 1000),
+    card('shape:oldcard', 'shape:old', 'dankbar', 1001),
+    frame('shape:new', pageA, 'Erntedank', 'erntedank', 2000),
+    card('shape:newcard', 'shape:new', 'dankbar', 2001),
+  );
+  const cleaned = dedupe(rerendered);
+  assert.deepEqual(framesOf(cleaned.snapshot), ['Erntedank'], 'the older duplicate of the same workspace is removed');
+  assert.deepEqual(cardsOf(cleaned.snapshot), ['shape:newcard'], 'the duplicate card of the older workspace goes with it');
+
+  // 5. Repeated delivery of the same render key is still deduplicated inside
+  //    one workspace, independent of the frame rule.
+  const repeated = snapshotOf(
+    frame('shape:r1', pageA, 'Erntedank', 'erntedank', 1000),
+    card('shape:dup-old', 'shape:r1', 'dankbar', 1001),
+    card('shape:dup-new', 'shape:r1', 'dankbar', 1002),
+  );
+  assert.equal(dedupe(repeated).removed, 1, 'a repeated render key must not produce a second card');
+  assert.deepEqual(cardsOf(dedupe(repeated).snapshot), ['shape:dup-new']);
+
+  // 6. The normalization must not touch human shapes at all.
+  const withHumanArrow = snapshotOf(
+    frame('shape:h1', pageA, 'Erntedank', 'erntedank', 1000),
+    { id: 'shape:hand', typeName: 'shape', type: 'note', parentId: 'shape:h1', x: 0, y: 0, index: 'a1', props: {}, meta: {} },
+    card('shape:agent-card', 'shape:h1', 'dankbar', 1001),
+    frame('shape:h2', pageA, 'Erntedank', 'erntedank', 2000),
+  );
+  const humaneResult = dedupe(withHumanArrow);
+  assert.ok(humaneResult.snapshot.document.store['shape:hand'], 'a human shape must never be removed by the renderer cleanup');
+
+  // 7. The historical heading key of the earlier renderer names the same kind
+  //    of shape and must be scoped the same way; boards migrated from the
+  //    legacy store still carry it.
+  const legacyKey = (id, pageId, name, at) => ({
+    id, typeName: 'shape', type: 'frame', parentId: pageId, x: 0, y: 0, index: 'a1',
+    props: { w: 1120, h: 720, name },
+    meta: { actor: 'agent', actorLabel: 'DSH Whiteboard', renderKey: 'pts-whiteboard:workspace-heading', at },
+  });
+  const legacyBoard = snapshotOf(
+    legacyKey('shape:l1', pageA, 'Renderer Smoke-Test', 1000),
+    legacyKey('shape:l2', pageB, 'Diagnose Page-Erzeugung', 2000),
+  );
+  const legacyKept = dedupe(legacyBoard);
+  assert.equal(legacyKept.removed, 0, 'a legacy workspace frame is a place on a page, not a document singleton');
+  assert.deepEqual(framesOf(legacyKept.snapshot), ['Diagnose Page-Erzeugung', 'Renderer Smoke-Test']);
+
+  // 8. Element keys of the renderer are per render, not per board: a second
+  //    workspace legitimately carries the same `renderer:c1` element key as the
+  //    first one. Scoping cards by their workspace keeps both; the plain
+  //    document-wide rule would empty the older workspace on the next reload.
+  const sharedElementKeys = snapshotOf(
+    frame('shape:w1', pageA, 'Hoffnung – erste Ideen', 'hoffnung – erste ideen', 1000),
+    card('shape:w1c1', 'shape:w1', 'c1', 1001),
+    card('shape:w1c2', 'shape:w1', 'c2', 1002),
+    frame('shape:w2', pageA, 'Hoffnung – weitere Ideen', 'hoffnung – weitere ideen', 2000),
+    card('shape:w2c1', 'shape:w2', 'c1', 2001),
+    card('shape:w2c2', 'shape:w2', 'c2', 2002),
+  );
+  const sharedKept = dedupe(sharedElementKeys);
+  assert.equal(sharedKept.removed, 0, 'the same element key in another workspace is not a duplicate card');
+  assert.deepEqual(framesOf(sharedKept.snapshot), ['Hoffnung – erste Ideen', 'Hoffnung – weitere Ideen']);
+  assert.deepEqual(cardsOf(sharedKept.snapshot), ['shape:w1c1', 'shape:w1c2', 'shape:w2c1', 'shape:w2c2']);
+
+  // 9. A genuinely re-rendered workspace still collapses to one frame — its
+  //    cards collapse with it, even though the neighbouring workspace kept its
+  //    own cards under the same element keys.
+  const rerenderedBesideOther = snapshotOf(
+    frame('shape:x1', pageA, 'Ausblick', 'ausblick', 1000),
+    card('shape:x1c1', 'shape:x1', 'c1', 1001),
+    frame('shape:x2', pageA, 'Ausblick', 'ausblick', 3000),
+    card('shape:x2c1', 'shape:x2', 'c1', 3001),
+    frame('shape:y1', pageA, 'Rückblick', 'rückblick', 2000),
+    card('shape:y1c1', 'shape:y1', 'c1', 2001),
+  );
+  const collapsed = dedupe(rerenderedBesideOther);
+  assert.deepEqual(framesOf(collapsed.snapshot), ['Ausblick', 'Rückblick'], 'only the duplicate workspace is reduced');
+  assert.deepEqual(cardsOf(collapsed.snapshot), ['shape:x2c1', 'shape:y1c1'], 'the neighbouring workspace keeps its own card');
+});
+
+/** Extract the reload-time normalization from the Classic-Script client and run it. */
+function loadDedupeRendererSnapshot() {
+  const extract = (name) => {
+    const start = client.indexOf(`function ${name}(`);
+    assert.ok(start >= 0, `${name} must exist in the client`);
+    let depth = 0;
+    for (let i = client.indexOf('{', start); i < client.length; i += 1) {
+      if (client[i] === '{') depth += 1;
+      else if (client[i] === '}') {
+        depth -= 1;
+        if (depth === 0) return client.slice(start, i + 1);
+      }
+    }
+    throw new Error(`unterminated body for ${name}`);
+  };
+  const body = [extract('normalizePageId'), extract('workspaceIdentity'), extract('isWorkspaceHeadingKey'), extract('workspaceGroupIdentity'), extract('rendererOwnerIdentity'), extract('rendererDedupeGroupKey'), extract('dedupeRendererSnapshot')].join('\n');
+  // eslint-disable-next-line no-new-func
+  return new Function(`${body}\nreturn dedupeRendererSnapshot;`)();
+}
