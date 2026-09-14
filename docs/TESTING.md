@@ -84,6 +84,18 @@ werden; eine reine Chat-Antwort reicht nicht.
   darf das Whiteboard-Log aber **nicht** automatisch einblenden. Nur eine
   tatsächlich ausgeführte Agentenaktion öffnet das Auto-Fenster; ein replayed
   Ack derselben `commandId` zählt nicht als Aktion.
+- Gestaltungsleiste: In einer Sidebar über 640 px Breite lässt der Kopfzeilen-
+  Knopf `🎨` die tldraw-Leiste oben rechts verschwinden und bringt **genau
+  dieselbe** Leiste zurück — ohne Neuladen, ohne zweiten Editor und ohne
+  Board-Reset. In einer Sidebar bis 640 px Breite rendert tldraw keine
+  angedockte Leiste; dort muss der Kompakt-Knopf der Werkzeugleiste die
+  Gestaltung weiterhin öffnen, auch während der Schalter „aus“ zeigt. Eine
+  Agentenaktion und der Log-Knopf dürfen die Gestaltungsleiste weder ein- noch
+  ausblenden.
+- Kopfzeilen-Knöpfe: `🎨` und `📋` tragen keinen sichtbaren Text mehr. Beide
+  müssen als Tooltip den vollständigen Satz zeigen („Gestaltung ausblenden — …“,
+  „Log einblenden — …“) und im aktiven Zustand sichtbar leuchten. In einer
+  schmalen Sidebar darf die Kopfzeile durch die beiden Knöpfe nicht umbrechen.
 
 ### Netzwerk-Leerlauf
 

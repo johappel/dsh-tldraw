@@ -22,6 +22,10 @@ window.__ModuleLoader__.load({
     var editorHolder = { editor: null };
     var boardHost = null;
     var boardRoot = null;
+    // Built once per loaded runtime. A new object identity on a later render
+    // would be a new tldraw component configuration, not an update.
+    var boardComponents = null;
+    var styleSubs = [];
     var boardKey = null;
     var boardSessionId = null;
     // Invalidate every in-flight asynchronous mount when the session or
@@ -39,8 +43,9 @@ window.__ModuleLoader__.load({
     var migrationRunning = false;
     var panelOpenFlag = false;      // vom Menschen gesetzt; Standard: ausgeblendet
     var panelAutoUntil = 0;         // Auto-Einblendung nur nach ausgeführter Agentenaktion
+    var stylePanelOpenFlag = false; // Gestaltungsleiste oben rechts; Standard ausgeblendet, der Mensch schaltet sie
     var sidebarRef = { open: null };
-    var uiState = { counts: { notes: 0, human: 0, agent: 0, proposals: 0 }, notes: [], proposals: [], selection: [], activity: [], phase: 'loading', error: '' };
+    var uiState = { counts: { notes: 0, human: 0, agent: 0, proposals: 0 }, notes: [], proposals: [], selection: [], activity: [], phase: 'loading', error: '', stylePanelOpen: false };
     var uiSubs = [];
 
     var clientCtx = { timeout: function (fn, ms) { return setTimeout(fn, ms); } };
@@ -332,6 +337,47 @@ window.__ModuleLoader__.load({
       return panelOpenFlag || Date.now() < panelAutoUntil;
     }
 
+    // Die Gestaltungsleiste (oben rechts: Farbe, Strichstärke, Deckkraft …) ist
+    // ein tldraw-UI-Slot. `components.StylePanel` wird von tldraw genau einmal
+    // gelesen und über `TldrawUiComponentsProvider` in den Editor-Kontext
+    // gemischt; ein neues Objekt bei jedem Render wäre eine neue
+    // Komponenten-Konfiguration. Deshalb wird das Objekt pro Runtime einmal
+    // gebaut und die Sichtbarkeit INNERHALB des Slots umgeschaltet:
+    // derselbe Editor, derselbe persistenceKey, kein Store-Schreibvorgang.
+    function createBoardComponents(mods) {
+      if (boardComponents) return boardComponents;
+      function BoardStylePanel(props) {
+        var boardReact = mods.react;
+        // Der Board-Baum läuft in tldraws gebündeltem React, nicht in dem der
+        // DSH-Oberfläche. Der Schalter liegt deshalb neben dem Board; der Slot
+        // abonniert ihn über `styleSubs` (siehe toggleStylePanel).
+        var state = boardReact.useState(stylePanelOpenFlag);
+        var setOpen = state[1];
+        boardReact.useEffect(function () {
+          var fn = function () { setOpen(stylePanelOpenFlag); };
+          styleSubs.push(fn);
+          return function () { var i = styleSubs.indexOf(fn); if (i >= 0) styleSubs.splice(i, 1); };
+        }, []);
+        // In einer schmalen Spalte gibt es die angedockte Leiste oben rechts gar
+        // nicht; dort führt tldraws eigener Kompakt-Knopf in der Werkzeugleiste
+        // zur Gestaltung. Wer den antippt, will Gestaltung sehen — dieser Slot
+        // lässt ihn deshalb immer durch. Der Schalter meint genau die Leiste
+        // oben rechts und nimmt niemandem den letzten Zugang zur Gestaltung.
+        if (props && props.isMobile === true) return boardReact.createElement(mods.tldraw.DefaultStylePanel, props);
+        if (!state[0]) return null;
+        return boardReact.createElement(mods.tldraw.DefaultStylePanel, props);
+      }
+      boardComponents = { StylePanel: BoardStylePanel };
+      return boardComponents;
+    }
+
+    /** Nur der Mensch schaltet die Gestaltungsleiste — kein Auto-Fenster. */
+    function toggleStylePanel() {
+      stylePanelOpenFlag = !stylePanelOpenFlag;
+      for (var i = 0; i < styleSubs.length; i++) { try { styleSubs[i](); } catch (err) {} }
+      pushUi({ stylePanelOpen: stylePanelOpenFlag });
+    }
+
     function loadModules() {
       if (modulesPromise) return modulesPromise;
       var importFn = new Function('u', 'return' + ' import(u)');
@@ -346,6 +392,7 @@ window.__ModuleLoader__.load({
       modulesPromise = importWithTimeout('/dsh-whiteboard/runtime.mjs', 12000).then(function (mods) {
         if (!mods || !mods.react || !mods.reactDomClient || !mods.tldraw) throw new Error('Lokale Whiteboard-Runtime ist unvollständig');
         loadedModules = { react: mods.react, reactDomClient: mods.reactDomClient, tldraw: mods.tldraw };
+        boardComponents = null;
         return loadedModules;
       }).catch(function (err) {
         modulesPromise = null;
@@ -370,7 +417,9 @@ window.__ModuleLoader__.load({
       migrateFromKey = null;
       migrationLastKey = null;
       migrationRunning = false;
-      uiState = { counts: { notes: 0, human: 0, agent: 0, proposals: 0 }, notes: [], proposals: [], selection: [], activity: [], phase: 'loading', error: '' };
+      stylePanelOpenFlag = false;
+      styleSubs = [];
+      uiState = { counts: { notes: 0, human: 0, agent: 0, proposals: 0 }, notes: [], proposals: [], selection: [], activity: [], phase: 'loading', error: '', stylePanelOpen: false };
       pushUi();
     }
 
@@ -411,6 +460,7 @@ window.__ModuleLoader__.load({
         boardRoot.render(mods.react.createElement(mods.tldraw.Tldraw, {
           persistenceKey: persistenceKey,
           inferDarkMode: true,
+          components: createBoardComponents(mods),
           onMount: function (editor) {
             if (mountEpoch !== boardMountEpoch || requestedSessionId !== sessionId) return;
             editorHolder.editor = editor;
@@ -1980,10 +2030,25 @@ window.__ModuleLoader__.load({
           React.createElement('span', { className: 'wb-spacer' }),
           triggerRow,
           React.createElement('button', {
-            className: 'wb-btn',
-            title: 'Whiteboard-Log: Änderungen seit dem letzten Feedback, Zettel-Liste, Cluster-Vorschläge, Aktivitätsprotokoll. Blendet sich nur nach einer ausgeführten Agentenaktion automatisch kurz ein — eine menschliche Änderung wird protokolliert, blendet das Log aber nie ein.',
+            className: 'wb-btn wb-btn-icon' + (ui.stylePanelOpen ? ' wb-btn-on' : ''),
+            'aria-label': ui.stylePanelOpen ? 'Gestaltung ausblenden' : 'Gestaltung einblenden',
+            'aria-pressed': ui.stylePanelOpen ? 'true' : 'false',
+            title: (ui.stylePanelOpen ? 'Gestaltung ausblenden' : 'Gestaltung einblenden') + ' — ' +
+              'Gestaltungsleiste oben rechts über der Leinwand (Farbe, Strichstärke, Deckkraft, Schrift, Ausrichtung, Rahmen). ' +
+              'Sie startet ausgeblendet und folgt allein diesem Knopf — weder Agentenaktionen noch dem Whiteboard-Log. ' +
+              'In einer sehr schmalen Sidebar zeichnet tldraw diese Leiste gar nicht; dort bleibt der Kompakt-Knopf der Werkzeugleiste zuständig. ' +
+              'Ohne Auswahl und außerhalb eines Zeichenwerkzeugs (z. B. Hand) zeigt die Leiste nichts an.',
+            onClick: function () { toggleStylePanel(); }
+          }, '🎨'),
+          React.createElement('button', {
+            className: 'wb-btn wb-btn-icon' + (panelVisible ? ' wb-btn-on' : ''),
+            'aria-label': panelVisible ? 'Log ausblenden' : 'Log einblenden',
+            'aria-pressed': panelVisible ? 'true' : 'false',
+            title: (panelVisible ? 'Log ausblenden' : 'Log einblenden') + ' — ' +
+              'Whiteboard-Log: Änderungen seit dem letzten Feedback, Zettel-Liste, Cluster-Vorschläge, Aktivitätsprotokoll. ' +
+              'Blendet sich nur nach einer ausgeführten Agentenaktion automatisch kurz ein — eine menschliche Änderung wird protokolliert, blendet das Log aber nie ein.',
             onClick: function () { panelOpenFlag = !panelVisible; panelAutoUntil = 0; pushUi(); }
-          }, panelVisible ? '📋 Log ausblenden' : '📋 Log einblenden')
+          }, '📋')
         ),
         React.createElement('div', { className: 'wb-body' },
           React.createElement('div', { className: 'wb-mount', ref: containerRef }),
@@ -2108,6 +2173,8 @@ window.__ModuleLoader__.load({
       '.wb-proposal-title{margin-bottom:4px;}' +
       '.wb-btn{font-size:11px;padding:2px 8px;border-radius:5px;border:1px solid rgba(255,255,255,.3);background:transparent;color:inherit;cursor:pointer;margin-right:4px;}' +
       '.wb-btn:hover{background:rgba(255,255,255,.12);}' +
+      '.wb-btn-on{border-color:rgba(140,160,255,.75);background:rgba(90,110,220,.24);}' +
+      '.wb-btn-icon{width:24px;min-width:24px;padding:0;font-size:14px;line-height:1;display:inline-flex;align-items:center;justify-content:center;}' +
       '.wb-actions{display:flex;flex-wrap:wrap;gap:4px;}' +
       '.wb-actions .wb-btn{margin-right:0;}' +
       '.wb-btn-primary{border-color:rgba(140,160,255,.7);background:rgba(90,110,220,.22);font-weight:600;}' +

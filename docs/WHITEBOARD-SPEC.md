@@ -120,6 +120,40 @@ im selben Tab auf der vorhandenen DSH-Oberfläche navigiert. Selbstverweise auf
 die aktuelle Seite werden nicht erzeugt. Ein neuer Tab darf nicht zu einem
 kontextlosen oder geschlossenen DSH-Panel führen.
 
+## Oberflächen-Schalter (menschlich)
+
+Die Gestaltungsleiste oben rechts (Farbe, Strichstärke, Deckkraft, Schrift,
+Ausrichtung, Rahmen) gehört dem Menschen und nur ihm.
+
+- `components.StylePanel` wird von tldraw genau einmal je Editor gelesen und
+  über den UI-Komponenten-Kontext gemischt. Der Client baut das
+  Komponenten-Objekt deshalb genau einmal pro geladener Runtime und schaltet
+  die Sichtbarkeit **innerhalb** des Slots um — derselbe Editor, derselbe
+  `persistenceKey`, kein Store-Schreibvorgang und kein Neumount.
+- Der Schalter ist ausschließlich an den Knopf `🎨` in der Kopfzeile gebunden.
+  Er folgt weder einer Agentenaktion noch dem Whiteboard-Log; die beiden Knöpfe
+  bleiben unabhängig. `🎨` und `📋` sind die beiden einzigen Knöpfe der
+  Kopfzeile ohne sichtbaren Text: Der sichtbare Inhalt ist das Icon, die
+  Beschriftung liegt vollständig in `aria-label` (Name), `title` (Tooltip samt
+  Begründungssatz) und `aria-pressed` (an/aus). Damit bricht die Kopfzeile in
+  einer schmalen Sidebar nicht um, ohne dass Screenreader oder Tooltip
+  Information verlieren.
+- Die Leiste startet **ausgeblendet** (tldraws eigener Standard wäre sichtbar).
+  Die Sidebar bleibt dadurch ruhig, bis der Mensch Gestaltung anfordert; der
+  Knopf `🎨` bleibt in diesem Zustand unmarkiert, `aria-label` lautet
+  „Gestaltung einblenden“.
+- In einer Sidebar oberhalb der tldraw-Breakpoint-Schwelle (`TABLET_SM`,
+  Breite > 640) rendert tldraw die angedockte Leiste und der Schalter blendet
+  sie aus und wieder ein. In einer schmaleren Spalte existiert die angedockte
+  Leiste nicht; dort bedient tldraws eigener Kompakt-Knopf in der
+  Werkzeugleiste dieselbe Gestaltung. Dieser Slot bleibt deshalb in der
+  Kompakt-Platzierung immer durchlässig: Der Schalter darf niemandem den
+  letzten Zugang zur Gestaltung nehmen (`MobileStylePanel` liefert `null`,
+  sobald der Slot fehlt).
+- Eine eingeschaltete, aber leere Leiste ist gültig. `DefaultStylePanel` zeigt
+  nichts an, solange kein Zeichenwerkzeug aktiv ist und keine Form mit
+  Stiloptionen ausgewählt wurde.
+
 ## Fehlerverhalten
 
 - Jede programmatische Board-Aktion ist einzeln abgefangen; ein fehlerhafter
