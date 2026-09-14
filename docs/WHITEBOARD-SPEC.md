@@ -74,8 +74,9 @@ ehrlicher `blocked`-Zustand; der Agent darf keinen Erfolg behaupten.
   allowlisteten Größe (`s`, `m`, `l`, `xl`) und `autoSize: true`. Der
   generische RenderPlan nimmt dafür nur neue, nicht-leere Text-Elemente an;
   vorhandene Shapes werden nicht in Freitext umgedeutet.
-- Pfeil-Label: `props.text`; Geometrie `props.start` und `props.end` als
-  `{x, y}`.
+- Pfeil-Label: `props.richText` als TipTap-Dokument (über `toRichText`), nicht
+  `props.text`; ein Pfeil ohne Label lässt die Label-Property ganz weg.
+  Geometrie `props.start` und `props.end` als `{x, y}`.
 - Frames: `{w, h, name}`; Frame-Hintergründe mit `sendToBack` hinter den
   Inhalt legen.
 - Der generische RenderPlan legt seine eigenen Karten mit `font: 'sans'` an,

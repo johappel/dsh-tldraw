@@ -1091,8 +1091,8 @@ window.__ModuleLoader__.load({
           var layoutHeadingStyle = { role: 'layout-heading', shape: 'text', color: 'black', size: 'l' };
           var leftHeader = renderStyledText(mods, layoutHeadingStyle, labels[0], root.x + 210, headerY, 'layout-header-left', { layoutDecoration: true });
           var rightHeader = renderStyledText(mods, layoutHeadingStyle, labels[1], root.x + 700, headerY, 'layout-header-right', { layoutDecoration: true });
-          var horizontal = { id: uniqueShapeId(mods), type: 'arrow', parentId: targetPage.id, x: root.x + 70, y: dividerY, props: { color: 'grey', start: { x: 0, y: 0 }, end: { x: root.props.w - 140, y: 0 }, text: '', arrowheadStart: 'none', arrowheadEnd: 'none' }, meta: { actor: 'agent', actorLabel: 'DSH Whiteboard', renderKey: 'renderer:layout-divider-horizontal', layoutDecoration: true } };
-          var vertical = { id: uniqueShapeId(mods), type: 'arrow', parentId: targetPage.id, x: midX, y: dividerY, props: { color: 'grey', start: { x: 0, y: 0 }, end: { x: 0, y: root.props.h - 205 }, text: '', arrowheadStart: 'none', arrowheadEnd: 'none' }, meta: { actor: 'agent', actorLabel: 'DSH Whiteboard', renderKey: 'renderer:layout-divider-vertical', layoutDecoration: true } };
+          var horizontal = { id: uniqueShapeId(mods), type: 'arrow', parentId: targetPage.id, x: root.x + 70, y: dividerY, props: { color: 'grey', start: { x: 0, y: 0 }, end: { x: root.props.w - 140, y: 0 }, arrowheadStart: 'none', arrowheadEnd: 'none' }, meta: { actor: 'agent', actorLabel: 'DSH Whiteboard', renderKey: 'renderer:layout-divider-horizontal', layoutDecoration: true } };
+          var vertical = { id: uniqueShapeId(mods), type: 'arrow', parentId: targetPage.id, x: midX, y: dividerY, props: { color: 'grey', start: { x: 0, y: 0 }, end: { x: 0, y: root.props.h - 205 }, arrowheadStart: 'none', arrowheadEnd: 'none' }, meta: { actor: 'agent', actorLabel: 'DSH Whiteboard', renderKey: 'renderer:layout-divider-vertical', layoutDecoration: true } };
           editor.createShapes([leftHeader, rightHeader, horizontal, vertical]);
           created.push(leftHeader, rightHeader, horizontal, vertical);
         }
@@ -1190,8 +1190,10 @@ window.__ModuleLoader__.load({
         var fb = editor.getShapePageBounds(from.id), tb = editor.getShapePageBounds(to.id);
         var arrowId = uniqueShapeId(mods);
         var linkRenderKey = semanticLinkRenderKey(links[li], li);
+        var linkProps = { color: 'light-violet', start: { x: 0, y: 0 }, end: { x: tb.x + tb.w / 2 - (fb.x + fb.w / 2), y: tb.y + tb.h / 2 - (fb.y + fb.h / 2) } };
+        if (links[li].label) linkProps.richText = toRichText(String(links[li].label));
         editor.createShapes([{ id: arrowId, type: 'arrow', parentId: targetPage.id, x: fb.x + fb.w / 2, y: fb.y + fb.h / 2,
-          props: { color: 'light-violet', start: { x: 0, y: 0 }, end: { x: tb.x + tb.w / 2 - (fb.x + fb.w / 2), y: tb.y + tb.h / 2 - (fb.y + fb.h / 2) }, text: links[li].label || '' },
+          props: linkProps,
           meta: { actor: 'agent', actorLabel: 'DSH Whiteboard', presentationRole: navigationStyle.role, renderKey: linkRenderKey } }]);
         createArrowBindings(editor, arrowId, from.id, to.id);
       }
@@ -1311,7 +1313,7 @@ window.__ModuleLoader__.load({
             var arrowId = uniqueShapeId(mods);
             editor.createShapes([{
               id: arrowId, type: 'arrow', x: x0 + ci2 * step + 115, y: y0 + 110,
-              props: { color: 'light-violet', start: { x: 0, y: 0 }, end: { x: step, y: 0 }, text: 'dann' },
+              props: { color: 'light-violet', start: { x: 0, y: 0 }, end: { x: step, y: 0 }, richText: toRichText('dann') },
               meta: { actor: 'agent', actorLabel: 'DSH-Agent', proposal: false, at: Date.now() }
             }]);
             try { createArrowBindings(editor, arrowId, seq[ci2].id, seq[ci2 + 1].id); } catch (berr) {
@@ -1393,7 +1395,7 @@ window.__ModuleLoader__.load({
         var fx = fb2.x + fb2.w / 2, fy = fb2.y + fb2.h / 2;
         var tx = tb.x + tb.w / 2, ty = tb.y + tb.h / 2;
         var props = { color: 'light-violet', start: { x: 0, y: 0 }, end: { x: tx - fx, y: ty - fy } };
-        if (cmd.label) props.text = String(cmd.label);
+        if (cmd.label) props.richText = toRichText(String(cmd.label));
         var arrowId2 = uniqueShapeId(mods);
         editor.run(function () {
           editor.createShapes([{

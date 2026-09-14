@@ -11,9 +11,17 @@ behaupten.
 ```powershell
 node --check F:\code\dsh-tldraw\plugin\dsh-whiteboard\lib\client.js
 node --check F:\code\dsh-tldraw\plugin\dsh-whiteboard\lib\index.js
+node --test --test-isolation=none F:\code\dsh-tldraw\plugin\dsh-whiteboard\test\render-layout.test.mjs
+node --test --test-force-exit F:\code\dsh-tldraw\plugin\dsh-whiteboard\test\arrow-schema.test.mjs
 node --test --test-isolation=none F:\code\pedagogical-thinking-space\tests\pts-whiteboard-renderer.test.mjs
 git diff --check
 ```
+
+`arrow-schema.test.mjs` lädt das vendorte tldraw-Runtime und validiert
+Pfeil-Props gegen das echte Schema (`text` wird als `Unexpected property`
+abgelehnt, `richText` und labelfreie Pfeile sind gültig). Das Runtime hält den
+Event-Loop offen, deshalb ist `--test-force-exit` erforderlich; die Datei nicht
+über einen ganzen Ordnerlauf ohne dieses Flag einsammeln.
 
 Der Renderer-Test muss mindestens Semantik-/Rollenvalidierung, fail-closed
 Referenzen, interne Tool-Grenze und den Handshake „closed → request open →

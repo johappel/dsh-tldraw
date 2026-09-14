@@ -23,3 +23,14 @@ test('the generic semantic renderer supports bounded text shapes without turning
   assert.match(client, /Freitext muss neuer, nicht-leerer Text sein/);
   assert.match(client, /var layoutHeadingStyle = \{ role: 'layout-heading', shape: 'text', color: 'black', size: 'l' \}/);
 });
+
+test('generic arrow shapes never carry the invalid tldraw text prop and label with richText', () => {
+  // tldraw 5.4.2 arrowShapeProps has no `text`; a label must be `richText`,
+  // otherwise the whole editor.run batch fails validation atomically.
+  for (const chunk of client.split("type: 'arrow'").slice(1)) {
+    assert.doesNotMatch(chunk.slice(0, 400), /\btext:/, 'arrow props must not carry a text field');
+  }
+  assert.match(client, /if \(links\[li\]\.label\) linkProps\.richText = toRichText\(String\(links\[li\]\.label\)\)/);
+  assert.match(client, /end: \{ x: step, y: 0 \}, richText: toRichText\('dann'\)/);
+  assert.match(client, /if \(cmd\.label\) props\.richText = toRichText\(String\(cmd\.label\)\)/);
+});
