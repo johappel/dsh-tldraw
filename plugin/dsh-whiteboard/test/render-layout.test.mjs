@@ -34,3 +34,24 @@ test('generic arrow shapes never carry the invalid tldraw text prop and label wi
   assert.match(client, /end: \{ x: step, y: 0 \}, richText: toRichText\('dann'\)/);
   assert.match(client, /if \(cmd\.label\) props\.richText = toRichText\(String\(cmd\.label\)\)/);
 });
+
+test('a render extends the board by workspace instead of wiping every renderer frame', () => {
+  // Cleanup is scoped to the matching workspace on the target page, so a new
+  // heading adds a frame beside existing content rather than replacing it.
+  assert.doesNotMatch(client, /var renderKeys = \{ 'renderer:workspace-heading': true/);
+  assert.match(client, /function workspaceIdentity\(value\)/);
+  assert.match(client, /var workspaceKey = workspaceIdentity\(plan\.heading/);
+  assert.match(client, /wMeta\.renderKey !== 'renderer:workspace-heading'\) continue;/);
+  assert.match(client, /if \(existingKey !== workspaceKey\) continue;/);
+  assert.match(client, /workspacePageId: targetPage\.id, workspaceKey: workspaceKey/);
+  assert.match(client, /if \(lowestEdge > 0\) originY = lowestEdge \+ 80;/);
+});
+
+test('replacing a workspace rescues non-renderer children before the frame is deleted', () => {
+  // tldraw cascades a frame delete to its children; human notes/arrows dropped
+  // inside must survive, so they are reparented to the page first.
+  assert.match(client, /var rescue = \[\];/);
+  assert.match(client, /var rendererOwned = childMeta\.actor === 'agent' && String\(childMeta\.renderKey \|\| ''\)\.indexOf\('renderer:'\) === 0;/);
+  assert.match(client, /else rescue\.push\(\{ id: all\[ci\]\.id, x: \(host\.x \|\| 0\) \+ \(all\[ci\]\.x \|\| 0\)/);
+  assert.match(client, /for \(var rs = 0; rs < rescue\.length[\s\S]*parentId: targetPage\.id, x: rescue\[rs\]\.x[\s\S]*if \(detachIds\.length\) editor\.deleteShapes\(detachIds\)/);
+});

@@ -84,6 +84,12 @@ ehrlicher `blocked`-Zustand; der Agent darf keinen Erfolg behaupten.
   Nur diese neuen `renderer:*`-Shapes werden danach als Frame-Kinder in lokale
   Koordinaten überführt; menschliche Shapes bleiben stets außerhalb dieser
   Löschkaskade.
+- Ein Arbeitsraum ist ein benannter Heading-Frame mit `meta.workspaceKey`
+  (normalisierter Titel). Ein Render ersetzt nur den Frame mit gleichem Schlüssel
+  auf der Zielseite; ein neuer Titel legt einen zweiten Frame darunter an, statt
+  vorhandene Frames zu löschen. Vor dem Löschen eines Frames werden alle nicht
+  renderer-eigenen Kinder (menschliche Zettel, Pfeile, fremde Arbeitsräume) auf
+  die Seite umgehängt, damit die tldraw-Löschkaskade sie nicht mitreißt.
 - Der generische Template-Katalog umfasst `comparison`, `pro_con`,
   `cause_effect`, `sequence`, `cluster`, `matrix` und `timeline`.
   Vergleichsformen haben feste Freitext-Überschriften und horizontale/vertikale

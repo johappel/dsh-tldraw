@@ -782,6 +782,12 @@ window.__ModuleLoader__.load({
       return value && value.indexOf('page:') === 0 ? value : (value ? 'page:' + value : '');
     }
 
+    // Stable identity of a workspace heading. Re-rendering the same titled
+    // workspace replaces it; a different title extends the board instead.
+    function workspaceIdentity(value) {
+      return String(value == null ? '' : value).replace(/\s+/g, ' ').trim().toLowerCase();
+    }
+
     function ensureRenderPage(editor, title) {
       var page = pageByName(editor, title);
       if (!page) {
@@ -1050,21 +1056,50 @@ window.__ModuleLoader__.load({
       }
       var created = [];
       var byKey = {};
-      // Only agent-owned shapes with a deterministic renderKey are replaced.
-      // Human shapes are never removed based on their type, text, or position.
-      var renderKeys = { 'renderer:workspace-heading': true, 'renderer:back-reference': true };
-      for (var rk = 0; rk < elements.length; rk++) renderKeys['renderer:' + String(elements[rk].key)] = true;
-      if (plan.overview && plan.overview.action === 'ensure_navigation_reference' && !samePage) renderKeys['renderer:overview-reference'] = true;
-      var plannedLinks = Array.isArray(plan.links) ? plan.links : [];
-      for (var lrk = 0; lrk < plannedLinks.length; lrk++) renderKeys[semanticLinkRenderKey(plannedLinks[lrk], lrk)] = true;
-      for (var oldIndex = 0; oldIndex < all.length; oldIndex++) {
-        var oldMeta = all[oldIndex].meta || {};
-        if (oldMeta.actor === 'agent' && renderKeys[oldMeta.renderKey]) addDetachId(all[oldIndex].id);
-        if (oldMeta.actor === 'agent' && String(oldMeta.renderKey || '').indexOf('renderer:layout-') === 0) addDetachId(all[oldIndex].id);
-        // Link arrows created before renderKey was introduced are still
-        // unambiguously renderer-owned by this generic actor/presentation
-        // marker. Remove only that legacy subset during migration.
-        if (all[oldIndex].type === 'arrow' && oldMeta.actor === 'agent' && oldMeta.actorLabel === 'DSH Whiteboard' && oldMeta.presentationRole === 'navigation') addDetachId(all[oldIndex].id);
+      // A workspace is one named heading frame. Re-rendering the SAME
+      // workspace (same target page and title) replaces it; a NEW title
+      // extends the board with another frame instead of wiping what is
+      // already there. Cleanup is scoped to the matching workspace on the
+      // target page, never to every renderer frame in the document.
+      var workspaceKey = workspaceIdentity(plan.heading && plan.heading.text || targetPage.name);
+      var replacedFrames = {};
+      for (var wi = 0; wi < all.length; wi++) {
+        var wShape = all[wi];
+        if (wShape.type !== 'frame') continue;
+        var wMeta = wShape.meta || {};
+        if (wMeta.actor !== 'agent' || wMeta.renderKey !== 'renderer:workspace-heading') continue;
+        if (normalizePageId(wShape.parentId) !== normalizePageId(targetPage.id)) continue;
+        var existingKey = wMeta.workspaceKey ? workspaceIdentity(wMeta.workspaceKey) : workspaceIdentity(wShape.props && wShape.props.name);
+        if (existingKey !== workspaceKey) continue;
+        replacedFrames[wShape.id] = wShape;
+        addDetachId(wShape.id);
+      }
+      var replacing = Object.keys(replacedFrames).length > 0;
+      // tldraw cascades a frame deletion to every child. Rescue anything the
+      // renderer did not create — a human note or arrow dropped inside the
+      // workspace, or a shape from another workspace — to the page first, so
+      // replacing a workspace never destroys foreign content.
+      var rescue = [];
+      for (var ci = 0; ci < all.length; ci++) {
+        var host = replacedFrames[all[ci].parentId];
+        if (!host) continue;
+        var childMeta = all[ci].meta || {};
+        var rendererOwned = childMeta.actor === 'agent' && String(childMeta.renderKey || '').indexOf('renderer:') === 0;
+        if (rendererOwned) addDetachId(all[ci].id);
+        else rescue.push({ id: all[ci].id, x: (host.x || 0) + (all[ci].x || 0), y: (host.y || 0) + (all[ci].y || 0) });
+      }
+      // The replaced workspace's page-level extras (link arrows, navigation
+      // cards) live beside the frame, not inside it. Remove them only when
+      // actually replacing; a pure extension deletes nothing here.
+      if (replacing) {
+        for (var li2 = 0; li2 < all.length; li2++) {
+          var lShape = all[li2];
+          var lMeta = lShape.meta || {};
+          if (lMeta.actor !== 'agent') continue;
+          if (normalizePageId(lShape.parentId) !== normalizePageId(targetPage.id)) continue;
+          var lKey = String(lMeta.renderKey || '');
+          if (lKey === 'renderer:back-reference' || lKey === 'renderer:overview-reference' || lKey.indexOf('renderer:link:') === 0 || (lShape.type === 'arrow' && lMeta.presentationRole === 'navigation')) addDetachId(lShape.id);
+        }
       }
       // A render issued while the target page is already active has no
       // meaningful "back to overview" destination. Remove an older
@@ -1077,9 +1112,31 @@ window.__ModuleLoader__.load({
       }
       var headingStyle = presentationStyle(plan.presentation && plan.presentation.heading, 'presentation.heading');
       var navigationStyle = presentationStyle(plan.presentation && plan.presentation.navigation, 'presentation.navigation');
-      var root = renderStyledNote(mods, headingStyle, plan.heading && plan.heading.text || targetPage.name, 40, 40, 'workspace-heading', { presentationRole: headingStyle.role, workspacePageId: targetPage.id });
+      // When extending, place the new frame below the lowest existing
+      // workspace on this page instead of stacking it on top of them.
+      var originX = 40, originY = 40;
+      if (!replacing) {
+        var lowestEdge = 0;
+        for (var fi = 0; fi < all.length; fi++) {
+          var fShape = all[fi];
+          if (fShape.type !== 'frame') continue;
+          var fMeta = fShape.meta || {};
+          if (fMeta.actor !== 'agent' || fMeta.renderKey !== 'renderer:workspace-heading') continue;
+          if (normalizePageId(fShape.parentId) !== normalizePageId(targetPage.id)) continue;
+          var fEdge = (fShape.y || 0) + ((fShape.props && fShape.props.h) || 720);
+          if (fEdge > lowestEdge) lowestEdge = fEdge;
+        }
+        if (lowestEdge > 0) originY = lowestEdge + 80;
+      }
+      var root = renderStyledNote(mods, headingStyle, plan.heading && plan.heading.text || targetPage.name, originX, originY, 'workspace-heading', { presentationRole: headingStyle.role, workspacePageId: targetPage.id, workspaceKey: workspaceKey });
       root.type = 'frame'; root.parentId = targetPage.id; root.props = { w: 1120, h: 720, name: plan.heading && plan.heading.text || targetPage.name };
       editor.run(function () {
+        for (var rs = 0; rs < rescue.length; rs++) {
+          var keep = null;
+          try { keep = editor.getShape(rescue[rs].id); } catch (rescueErr) {}
+          if (!keep) continue;
+          editor.updateShapes([{ id: keep.id, type: keep.type, parentId: targetPage.id, x: rescue[rs].x, y: rescue[rs].y, meta: Object.assign({}, keep.meta) }]);
+        }
         if (detachIds.length) editor.deleteShapes(detachIds);
         editor.createShapes([root]); created.push(root);
         var template = String(plan.layout && plan.layout.template || 'learning_moment_workspace');
